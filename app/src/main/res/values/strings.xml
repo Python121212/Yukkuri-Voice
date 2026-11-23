@@ -1,0 +1,13 @@
+<resources>
+    <string name="app_name">ゆっくりボイス</string>
+    <string name="hint_input">読み上げる文章を入力（漢字かな交じりOK）</string>
+    <string name="btn_speak">ゆっくり話す</string>
+    <string name="btn_stop">停止</string>
+    <string name="btn_save">音声を保存</string>
+    <string name="label_preset">声の種類</string>
+    <string name="label_reading">読み</string>
+    <string name="label_speed">話速</string>
+    <string name="label_pitch">ピッチ</string>
+    <string name="label_intonation">抑揚</string>
+    <string name="sample_text">ゆっくりしていってね！今日はいい天気ですね。</string>
+</resources>

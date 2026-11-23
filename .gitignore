@@ -1,0 +1,10 @@
+node_modules/
+build/
+android/build/
+android/app/build/
+*.o
+*.so
+!android/app/src/main/jniLibs/**/*.so
+__pycache__/
+.venv/
+ci-out/

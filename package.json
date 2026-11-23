@@ -1,0 +1,12 @@
+{
+  "name": "yukkuri-voice",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A from-scratch formant-synthesis TTS engine tuned for the Yukkuri voice (Android native)",
+  "scripts": {
+    "dict": "node scripts/build-dict.mjs"
+  },
+  "dependencies": {
+    "kuromoji": "0.1.2"
+  }
+}

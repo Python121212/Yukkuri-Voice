@@ -347,9 +347,14 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     onep_set(&glottalLp, 900.0f, sr);     /* 声帯パルスの丸め */
     onep_set(&radLp, 15000.0f, sr);       /* 放射後の高域の歯止め */
     onep_set(&noiseLp, 2500.0f, sr);
-    /* 破裂音の破裂は 1-4kHz が主成分。高域まで通すと「プスッ」と
-       金属的に鳴るので 2 次で 3.5kHz から落とす。 */
-    biquad_lp_set(&radNLp, 3500.0f, sr);
+    /* 破裂音のバーストは 1-4kHz が主成分。高域まで通すと「プスッ」と
+       金属的に鳴るので 2 次で落とす。ただし摩擦音にも同じフィルタが
+       掛かるので、折れ点を 3.5kHz まで下げると /s/ の 5-7kHz まで
+       削れて「し」「す」「さ」がぼやける。バーストだけ別に絞る。 */
+    biquad_lp_set(&radNLp, 6000.0f, sr);
+    BiquadLp burstLp;       /* 破裂のバースト専用 (1-4kHz に収める) */
+    biquad_lp_reset(&burstLp);
+    biquad_lp_set(&burstLp, 3200.0f, sr);
 
     Rnd rnd = { 0x9E3779B9u };
 
@@ -472,6 +477,7 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             burst = 0.0f;
             burstHp = 0.0f;
             biquad_lp_reset(&radNLp);
+            biquad_lp_reset(&burstLp);
             out[pos] = 0.0f;
             if (noiseBuf) noiseBuf[pos] = 0.0f;
             if (voicedHist) voicedHist[pos] = 0.0f;
@@ -569,7 +575,8 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
                    なる。実際の破裂も 1-2ms かけて立ち上がる。 */
                 if (clickAtk < 1.0f) clickAtk += clickAtkStep;
                 if (clickAtk > 1.0f) clickAtk = 1.0f;
-                noise += (burst - burstHp) * clickEnv * clickAtk;
+                /* バーストは 1-4kHz に絞る (高域まで通すと「プシュ」) */
+                noise += biquad_lp_run(&burstLp, burst - burstHp) * clickEnv * clickAtk;
                 clickEnv *= 0.99270f;                        /* τ ≈ 2.5ms */
             }
 

@@ -26,6 +26,9 @@ typedef struct {
 
 static void reson_clear(Reson *r) { r->y1 = r->y2 = 0.0f; }
 
+/* 2 次共振器。H(z) = a / (1 - b z^-1 - c z^-2)。
+   ピーク (DC) ゲインが 1 になるよう a = 1 - b - c とする。
+   (分母の絶対値を a にすると、共振周波数でゲインが落ちる「ノッチ」になってしまう) */
 static void reson_set(Reson *r, float f, float bw, float sr)
 {
     const float t = 1.0f / sr;
@@ -33,15 +36,8 @@ static void reson_set(Reson *r, float f, float bw, float sr)
     const float th = 2.0f * (float)M_PI * f * t;
     r->b = 2.0f * rho * cosf(th);
     r->c = -rho * rho;
-    /* |1 - b e^{-jθ} - c e^{-2jθ}| を計算して a に与えると、
-       共振周波数でのゲインがちょうど 1 になる */
-    const float c1 = cosf(th), s1 = sinf(th);
-    const float c2 = cosf(2.0f * th), s2 = sinf(2.0f * th);
-    const float zr = 1.0f - r->b * c1 - r->c * c2;
-    const float zi = r->b * s1 + r->c * s2;
-    float mag = sqrtf(zr * zr + zi * zi);
-    if (mag < 1e-4f) mag = 1e-4f;
-    r->a = mag;
+    r->a = 1.0f - r->b - r->c;
+    if (r->a < 0.0f) r->a = 0.0f;
 }
 
 static inline float reson_run(Reson *r, float x)
@@ -182,7 +178,6 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     float ampLevel = 0.0f;
     float clickEnv = 0.0f;
     float prevY = 0.0f;
-    float prevSrc = 0.0f;
     float jitter = 0.0f;
     long vibPhase = 0;
     long closureLeft = 0;
@@ -249,23 +244,21 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             cur.noiseBw += (target.noiseBw - cur.noiseBw) * glide;
 
             /* ---- 共振器 ---- */
-            /* パラメータがほぼ静止しているときは係数を更新しない
-               (毎 30 サンプルで更新すると、減衰しきらないうちに係数が変わり不安定になる) */
-            float motion = 0.0f;
-            for (int i = 0; i < 5; i++) motion += fabsf(target.f[i] - cur.f[i]);
-            motion += fabsf(target.bw - cur.bw) * 3.0f;
-            int needUpdate = (s & 31) == 0 && (motion > 1.0f || (s == 0));
+            /* 係数は 32 サンプルごとに更新する。
+               (母音が切り替わった直後に更新を止めると、遷移途中の
+                フォルマントで凍結してしまうため、常に更新する) */
+            int needUpdate = (s & 31) == 0;
             if (needUpdate) {
                 for (int i = 0; i < 5; i++) {
                     /* 帯域幅: 低次のフォルマントほど狭く、高次は広く。
                        Q = f/bw が高すぎると F0 付近の成分が暴走するので上限を設ける。 */
                     float bw = cur.bw * (1.0f + 0.45f * (float)i);
-                    if (bw < 60.0f) bw = 60.0f;
+                    if (bw < 80.0f) bw = 80.0f;
                     float f = cur.f[i];
                     if (f < 200.0f) f = 200.0f;
                     if (f > 0.45f * sr) f = 0.45f * sr;
                     /* F1/F2 は Q を抑える (F0 付近の発振防止)、F3 以降は自然な狭帯域で OK */
-                    if (i <= 1 && f / bw > 12.0f) bw = f / 12.0f;
+                    if (i <= 1 && f / bw > 10.0f) bw = f / 10.0f;
                     reson_set(&r[i], f, bw, sr);
                 }
                 /* 摩擦音のノイズを帯域に乗せる */
@@ -306,21 +299,16 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
 
             /* ---- カスケード共振器 ----
                フォルマントを 3 段まで通す (F1-F3 が声質の主要成分)。
-               F4/F5 は狭帯域で減衰が大きく、カスケードすると非対称な応答で
-               発散しやすいので、代わりに「明るさ」として一次の高域成分を足す。
-               摩擦ノイズは前腔 (F2 まで) を通す。 */
+               有声源は 5 段すべて通す。摩擦ノイズは前腔 (F2 まで) に相当する
+               位置で足す。 */
             float y = reson_run(&r[0], src);
-            y = reson_run(&r[1], y);
             y += reson_run(&nres, nz) * cur.noise * 1.6f;
-            y = reson_run(&r[2], y);
-            float bright = src - 0.85f * prevSrc;
-            prevSrc = src;
-            y += onep_lp(&outLp, bright) * 0.22f * cur.voiced;
+            for (int i = 1; i < 5; i++) y = reson_run(&r[i], y);
 
             /* ---- 放射特性 ----
                唇の放射は +6dB/oct。差分 (微分) は高域を持ち上げるが、
                フォルマントのピーク近傍で暴れやすいので弱めの傾斜にする。 */
-            float outS = y - 0.62f * prevY;
+            float outS = onep_lp(&outLp, y - 0.70f * prevY);
             prevY = y;
 
             float tAmp = cur.amp * ph->amp;

@@ -22,9 +22,13 @@ path = sys.argv[1]; t = float(sys.argv[2]); dur = float(sys.argv[3]) if len(sys.
 w = wave.open(path); sr = w.getframerate()
 x = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(float)/32768
 seg = x[int(t*sr):int((t+dur)*sr)]
-a = lpc(seg, int(sr/1000*1.0 + 4))
-roots = [r for r in np.roots(a) if np.imag(r) > 0.01]
-fs = sorted([abs(np.angle(r))*sr/(2*np.pi) for r in roots])
-bw = [ -sr/np.pi*np.log(abs(r)) for r in roots ]
-out = [(f, b) for f, b in zip(sorted([abs(np.angle(r))*sr/(2*np.pi) for r in roots]), [bw[i] for i in np.argsort([abs(np.angle(r))*sr/(2*np.pi) for r in roots])]) if 150 < f < sr/2-500 and b < 800]
-print('formants:', [round(f) for f, _ in out[:4]], 'bw:', [round(b) for _, b in out[:4]])
+a = lpc(seg, 16)
+roots = np.roots(a)
+forms = []
+for r in roots:
+    f = abs(np.angle(r))*sr/(2*np.pi)
+    bw = -sr/np.pi*np.log(abs(r))
+    if np.imag(r) > 0 and bw < 500 and f > 200:
+        forms.append((f, bw))
+forms.sort()
+print('formants:', [round(f) for f, _ in forms[:4]], 'bw:', [round(b) for _, b in forms[:4]])

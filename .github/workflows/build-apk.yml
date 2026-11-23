@@ -41,11 +41,12 @@ jobs:
         with:
           gradle-version: "8.7"
 
-      - name: Native engine sanity test (host gcc)
+      - name: Native engine tests (host gcc)
         run: |
           gcc -std=c99 -O2 -Wall -Wextra -Icore/include core/src/*.c tools/cli.c -lm -o /tmp/ykcli
           /tmp/ykcli "ゆっくりしていってね" /tmp/test.wav yukkuri --dump | head -5
-          ls -la /tmp/test.wav
+          gcc -std=c99 -O2 -Icore/include core/src/*.c tools/test_engine.c -lm -o /tmp/test_engine
+          /tmp/test_engine
 
       # 失敗の原因をログ API なしでも読めるよう annotation で出す
       - name: Kotlin unit tests

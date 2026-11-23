@@ -45,7 +45,18 @@ jobs:
           ls -la /tmp/test.wav
 
       - name: Build debug APK
-        run: gradle --no-daemon -p . :app:assembleDebug
+        run: |
+          set +e
+          gradle --no-daemon -p . :app:assembleDebug --stacktrace > /tmp/build.log 2>&1
+          rc=$?
+          tail -60 /tmp/build.log
+          if [ $rc -ne 0 ]; then
+            # ログ API が使えない環境でも原因が分かるように、要点を annotation で出す
+            grep -E "^e: |error:|Caused by:|What went wrong|^> |FAILURE|Unresolved|Execution failed" /tmp/build.log \
+              | head -25 | while IFS= read -r line; do echo "::error title=gradle::$line"; done
+            tail -40 /tmp/build.log | while IFS= read -r line; do echo "::warning title=tail::$line"; done
+          fi
+          exit $rc
 
       - name: Collect outputs
         run: |

@@ -160,7 +160,7 @@ int yk_plan_from_kana(const char *kana, const YkPreset *preset, YkPlan *out)
         if (k->cons == 0xFE) continue; /* 長音は上で処理済み */
 
         if (k->cons == YK_P_CL) {          /* っ: 次の子音の閉鎖を伸ばす */
-            yk_plan_push(out, YK_P_CL, 90, preset->pitch, 0.0f);
+            yk_plan_push(out, YK_P_CL, 50, preset->pitch, 0.0f);
             continue;
         }
         if (k->cp == 0x3093) {             /* ん */

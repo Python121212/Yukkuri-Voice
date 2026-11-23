@@ -797,13 +797,13 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     /* ---- 語尾の減衰 (「プツ」対策) ----
        母音や摩擦音が大きい振幅のまま切れて無音に入ると、波形が
        いきなり 0 になる段差が「プツ」というクリックになる。
-       1ms ごとの RMS 包絡で無音区間を見つけ、その直前 40ms を
+       1ms ごとの RMS 包絡で無音区間を見つけ、その直前 60ms を
        コサインで滑らかに落とす。サンプル値ではなく包絡で判定するので、
        ゼロクロスを無音と誤認しない。立ち上がりには触らない。 */
     if (pos > 0) {
         const long hop = (long)(0.001f * sr) > 0 ? (long)(0.001f * sr) : 1;
         const long nh = pos / hop + 1;
-        const long rel = (long)(0.040f * sr);
+        const long rel = (long)(0.060f * sr);
         for (long h = 1; h < nh; h++) {
             long b = h * hop;
             if (b >= pos) break;

@@ -251,7 +251,17 @@ class AudioPlayer(
                 t.write(pcm, 0, n)
                 i += n
             }
+            /* 書き込みが終わった直後に stop() すると、AudioTrack の
+               バッファに残っている末尾 (最大で minBuf ぶん = 250ms 程度) が
+               捨てられ、語尾が「プツ」と切れて聞こえる。
+               無音を流して再生位置が書き込み位置に追いつくのを待ってから止める。 */
             if (running) {
+                val tail = ShortArray(chunk)   /* 無音 */
+                val deadline = System.currentTimeMillis() + 600
+                while (running && t.playbackHeadPosition < i &&
+                       System.currentTimeMillis() < deadline) {
+                    t.write(tail, 0, chunk)
+                }
                 t.stop()
             }
             onDone(true)

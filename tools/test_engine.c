@@ -405,6 +405,36 @@ static void test_fricative_brightness(void)
     }
 }
 
+/* 「し」(/ɕ/) と「す」(/s/) が聞き分けられること。
+   /ɕ/ は 3-4kHz に山があり 5-6kHz が弱い。/s/ は 5-6kHz まで平坦。
+   ノイズ帯域を 1800Hz と広く取っていたときは /ɕ/ が /s/ に近づき、
+   「し」が「す」に聞こえた。 */
+static void test_sh_vs_s(void)
+{
+    const char *kana[2] = { "し", "す" };
+    double contrast[2] = { 0, 0 };
+    for (int i = 0; i < 2; i++) {
+        int n = yk_speak_kana(kana[i], yk_preset(0), buf, (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+        check(n > 0, "合成失敗: %s", kana[i]);
+        if (n <= 0) return;
+        /* 先頭 100ms のうち、母音が始まる前の摩擦だけを見る */
+        int len = SR * 100 / 1000;
+        if (len > n) len = n;
+        double e34 = 0, e56 = 0;
+        for (int k = 1; k < 300; k++) {
+            double f = 100.0 * k;
+            if (f > SR / 2 - 100) break;
+            double a = harm_amp(buf, len, SR, f);
+            double p = a * a;
+            if (f >= 3000 && f < 4000) e34 += p;
+            if (f >= 5000 && f < 6000) e56 += p;
+        }
+        contrast[i] = 10.0 * log10((e34 + 1e-20) / (e56 + 1e-20));
+    }
+    check(contrast[0] > 8.0, "し: 5-6kHz が強すぎる (3-4k との差 %+.1f dB)", contrast[0]);
+    check(contrast[1] < 3.0, "す: 5-6kHz が弱すぎる (3-4k との差 %+.1f dB)", contrast[1]);
+}
+
 static void test_pause_duration(void)
 {
     /* 句読点で間が入り、全体が長くなる */
@@ -426,6 +456,7 @@ int main(void)
     test_burst_band();
     test_tail_no_click();
     test_fricative_brightness();
+    test_sh_vs_s();
     test_pause_duration();
     if (failures) {
         printf("\n%d 件のテストが失敗しました\n", failures);

@@ -379,6 +379,32 @@ static void test_tail_no_click(void)
     check(worst < 6.0, "語尾に段差がある (相対 %.1f)", worst);
 }
 
+/* 摩擦音の明るさ。
+   破裂用のローパスを摩擦経路にも掛けていたときは /s/ の重心が
+   4.1kHz まで落ち、「し」「す」「さ」がぼやけて聞き分けにくかった。
+   帯域ノイズは 5-7kHz まで残っている必要がある。 */
+static void test_fricative_brightness(void)
+{
+    const char *kana[3] = { "さ", "す", "し" };
+    const double lo[3] = { 4500.0, 4500.0, 3000.0 };   /* 期待する重心の下限 */
+    for (int i = 0; i < 3; i++) {
+        int n = yk_speak_kana(kana[i], yk_preset(0), buf, (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+        check(n > 0, "合成失敗: %s", kana[i]);
+        if (n <= 0) continue;
+        int len = n / 2;                    /* 子音部 */
+        double num = 0.0, den = 0.0;
+        for (int k = 1; k < 200; k++) {
+            double f = 200.0 * k;
+            if (f > SR / 2 - 200) break;
+            double a = harm_amp(buf, len, SR, f);
+            num += a * a * f;
+            den += a * a;
+        }
+        double cen = den > 0 ? num / den : 0.0;
+        check(cen > lo[i], "%s: 摩擦音が暗すぎる (重心 %.0f Hz)", kana[i], cen);
+    }
+}
+
 static void test_pause_duration(void)
 {
     /* 句読点で間が入り、全体が長くなる */
@@ -399,6 +425,7 @@ int main(void)
     test_no_sideband_noise();
     test_burst_band();
     test_tail_no_click();
+    test_fricative_brightness();
     test_pause_duration();
     if (failures) {
         printf("\n%d 件のテストが失敗しました\n", failures);

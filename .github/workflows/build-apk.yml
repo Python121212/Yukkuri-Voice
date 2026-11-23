@@ -65,7 +65,7 @@ jobs:
           rc=$?
           tail -40 /tmp/build.log
           if [ $rc -ne 0 ]; then
-            grep -E "^e: |FAILURE:|error:|What went wrong|Execution failed|Caused by:" /tmp/build.log \
+            grep -E "^e: |CMake Error|FAILURE:|error:|error when building|What went wrong|Execution failed|Caused by:" /tmp/build.log \
               | head -30 | while IFS= read -r line; do echo "::error title=gradle::$(echo "$line" | sed 's|.*/app/src/main/java/com/py1212/yukkuri/||')"; done
           fi
           exit $rc

@@ -322,6 +322,63 @@ static void test_presets(void)
     }
 }
 
+/* 破裂音のバーストが「プッ」と聞こえる高域に偏っていないこと。
+   2 次 LP を入れる前は重心が 12-15kHz あり、子音が「プシュ」に聞こえた。 */
+static void test_burst_band(void)
+{
+    const char *kana[6] = { "か", "た", "ぱ", "が", "だ", "ば" };
+    for (int i = 0; i < 6; i++) {
+        int n = yk_speak_kana(kana[i], yk_preset(0), buf, (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+        check(n > 0, "合成失敗: %s", kana[i]);
+        if (n <= 0) continue;
+        /* 最も強い 4ms 窓 = 破裂 */
+        int w = SR / 250;
+        int best = 0; double be = 0;
+        for (int st = 0; st + w <= n / 2; st += w / 2) {
+            double r = rms_between(buf, st, st + w);
+            if (r > be) { be = r; best = st; }
+        }
+        if (be < 1e-4) continue;
+        /* その窓のスペクトル重心 (DFT を粗く走査) */
+        double num = 0.0, den = 0.0;
+        for (int k = 1; k < 96; k++) {
+            double f = 300.0 * k;
+            if (f > SR / 2 - 300) break;
+            double a = harm_amp(buf + best, w, SR, f);
+            num += a * a * f;
+            den += a * a;
+        }
+        double cen = den > 0 ? num / den : 0.0;
+        check(cen < 7000.0, "%s: 破裂の重心が高すぎる (%.0f Hz)", kana[i], cen);
+    }
+}
+
+/* 語尾が「プツ」と切れないこと。
+   有音の終わりで 1 サンプル段差が残ると、語尾にクリックが付く。 */
+static void test_tail_no_click(void)
+{
+    int n = yk_speak_kana("ゆっくりしていってね。", yk_preset(0), buf,
+                          (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+    check(n > 0, "合成失敗 (語尾)");
+    if (n <= 0) return;
+    /* 無音に入る直前 60ms の最大サンプル間差分が、直前の局所 rms に
+       比べて跳ねていないか。 */
+    int st = n - SR / 10;
+    if (st < 0) st = 0;
+    double worst = 0.0;
+    for (int i = 1; i < n; i++) {
+        int a = i - SR / 500, b = i + SR / 500;
+        if (a < 0) a = 0;
+        if (b > n) b = n;
+        double r = rms_between(buf, a, b);
+        double d = fabs((double)buf[i] - (double)buf[i - 1]);
+        /* 相対的にも絶対的にも大きい段差だけをクリックとみなす。
+           無音直前の微小な残り (0.003 程度) は聞こえない。 */
+        if (r > 1e-5 && d > 0.01 && d / r > worst) worst = d / r;
+    }
+    check(worst < 6.0, "語尾に段差がある (相対 %.1f)", worst);
+}
+
 static void test_pause_duration(void)
 {
     /* 句読点で間が入り、全体が長くなる */
@@ -340,6 +397,8 @@ int main(void)
     test_loudness();
     test_deterministic();
     test_no_sideband_noise();
+    test_burst_band();
+    test_tail_no_click();
     test_pause_duration();
     if (failures) {
         printf("\n%d 件のテストが失敗しました\n", failures);

@@ -35,6 +35,16 @@ typedef struct {
     float y1, y2;
 } Reson;
 
+/* 目標係数と、そこへ向かう 1 サンプルあたりの増分。
+   係数を 64 サンプルごとに「段階的に」差し替えると、その時刻に
+   波形の不連続が生まれて周期 750Hz の側帯波 (=「プシュ」という雑音)
+   が出る。目標値へ 1 サンプルずつ線形に近づけることで消す。 */
+typedef struct {
+    Reson  r;
+    float ta, tb, tc;    /* 目標 */
+    float da, db, dc;    /* 増分 */
+} SmReson;
+
 static void reson_reset(Reson *r) { r->y1 = r->y2 = 0.0f; }
 
 static void reson_set(Reson *r, float f, float bw, float sr)
@@ -52,25 +62,35 @@ static void reson_set(Reson *r, float f, float bw, float sr)
     if (r->a < 1e-6f) r->a = 1e-6f;
 }
 
-/* 中心周波数 f でのゲインがちょうど 1 になるように正規化する。
-   並列バンクでは「各枝の強さ = 指定した振幅」でなければ設計できないので、
-   ここで正規化しておく (カスケード用の reson_set とは別物)。 */
-static void reson_set_unit(Reson *r, float f, float bw, float sr)
-{
-    if (f < 60.0f) f = 60.0f;
-    if (f > 0.45f * sr) f = 0.45f * sr;
-    if (bw < 40.0f) bw = 40.0f;
-    if (bw > 0.4f * sr) bw = 0.4f * sr;
+/* ---- 係数を滑らかに動かす共振器 ---- */
+static void sm_reset(SmReson *s) { s->r.y1 = s->r.y2 = 0.0f; }
 
-    const float rho = expf(-(float)M_PI * bw / sr);
-    const float th = 2.0f * (float)M_PI * f / sr;
-    r->b = 2.0f * rho * cosf(th);
-    r->c = -rho * rho;
-    /* |1 - b e^-jth - c e^-2jth| */
-    const float dre = 1.0f - r->b * cosf(th) - r->c * cosf(2.0f * th);
-    const float dim = r->b * sinf(th) + r->c * sinf(2.0f * th);
-    const float mag = sqrtf(dre * dre + dim * dim);
-    r->a = mag > 1e-6f ? mag : 1e-6f;
+/* 目標係数を決める。次の update までの sample 数で割って増分にする。 */
+static void sm_target(SmReson *s, float f, float bw, float sr, float glideSamples)
+{
+    Reson t;
+    reson_set(&t, f, bw, sr);
+    s->ta = t.a; s->tb = t.b; s->tc = t.c;
+    if (glideSamples < 1.0f) glideSamples = 1.0f;
+    s->da = (s->ta - s->r.a) / glideSamples;
+    s->db = (s->tb - s->r.b) / glideSamples;
+    s->dc = (s->tc - s->r.c) / glideSamples;
+}
+
+static inline float sm_run(SmReson *s, float x)
+{
+    Reson *r = &s->r;
+    /* 目標に近づける (行き過ぎない) */
+    r->a += (s->da > 0.0f) ? ((r->a < s->ta) ? s->da : 0.0f)
+                           : ((r->a > s->ta) ? s->da : 0.0f);
+    r->b += (s->db > 0.0f) ? ((r->b < s->tb) ? s->db : 0.0f)
+                           : ((r->b > s->tb) ? s->db : 0.0f);
+    r->c += (s->dc > 0.0f) ? ((r->c < s->tc) ? s->dc : 0.0f)
+                           : ((r->c > s->tc) ? s->dc : 0.0f);
+    float y = r->a * x + r->b * r->y1 + r->c * r->y2;
+    r->y2 = r->y1;
+    r->y1 = y;
+    return y;
 }
 
 /* 状態が暴走しないための安全弁。
@@ -275,8 +295,14 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     if (total > YK_MAX_SAMPLES) total = YK_MAX_SAMPLES;
 
     /* ---- 状態 ---- */
-    Reson r[8], nres;
-    for (int i = 0; i < 8; i++) { reson_reset(&r[i]); reson_set(&r[i], 700, 80, sr); }
+    SmReson r[8];
+    Reson nres;
+    for (int i = 0; i < 8; i++) {
+        sm_reset(&r[i]);
+        reson_set(&r[i].r, 700, 80, sr);
+        r[i].ta = r[i].r.a; r[i].tb = r[i].r.b; r[i].tc = r[i].r.c;
+        r[i].da = r[i].db = r[i].dc = 0.0f;
+    }
     reson_reset(&nres);
     reson_set(&nres, 4000, 2000, sr);
 
@@ -323,8 +349,10 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     const float kShelf = 3.2f;
 
     for (int j = 0; j < 3; j++) {
-        reson_reset(&r[5 + j]);
-        reson_set_unit(&r[5 + j], YK_HF_F[j], YK_HF_B[j], sr);
+        sm_reset(&r[5 + j]);
+        reson_set(&r[5 + j].r, YK_HF_F[j], YK_HF_B[j], sr);
+        r[5 + j].ta = r[5 + j].r.a; r[5 + j].tb = r[5 + j].r.b; r[5 + j].tc = r[5 + j].r.c;
+        r[5 + j].da = r[5 + j].db = r[5 + j].dc = 0.0f;
     }
 
     OnePole shelfLp;
@@ -359,6 +387,10 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
 
         /* ---- 目標フレーム ---- */
         frame_for_phone(p, preset, &target);
+        /* 破裂音のノイズは「破裂の瞬間」だけ。音素テーブルの noise を
+           そのまま使うと、子音の長さぶん (60-80ms) ずっとノイズが鳴り、
+           「ぷしゅ」という息の音になる。破裂音の音は閉鎖 + 短い破裂。 */
+        if (is_stop(p)) target.noise = 0.0f;
         if (p != YK_P_PAUSE && p > YK_P_O) {
             int pv = find_vowel_back(plan, idx);
             int nv = find_vowel_fwd(plan, idx);
@@ -392,7 +424,7 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
                ここを飛ばすと、閉鎖明けの 1 サンプルだけ放射差分が跳ねて
                「カチッ」というクリックになる。 */
             float yy = 0.0f;
-            for (int i = 0; i < 8; i++) yy = reson_run(&r[i], 0.0f);
+            for (int i = 0; i < 8; i++) yy = sm_run(&r[i], 0.0f);
             prevRad = yy;
             out[pos] = 0.0f;
             if (noiseBuf) noiseBuf[pos] = 0.0f;
@@ -403,7 +435,11 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
         else if (p == YK_P_Z || p == YK_P_J) clickEnv = 0.10f;
 
         /* ---- 本体 ---- */
-        const long n = (long)(ph->dur / spd * sr / 1000.0f);
+        /* 母音は長めに取る。短すぎると共鳴が立ち上がりきる前に次の
+           子音が来て、こもった「プ」のような音になる。 */
+        float durMs = ph->dur / spd;
+        if (p <= YK_P_O) durMs *= 1.45f;
+        const long n = (long)(durMs * sr / 1000.0f);
         const int isPause = (p == YK_P_PAUSE);
         const int isFric = (p == YK_P_S || p == YK_P_SH || p == YK_P_H || p == YK_P_F ||
                             p == YK_P_Z || p == YK_P_J);
@@ -427,10 +463,12 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
 
             /* 摩擦音など無声子音は、有声の重なりでノイズが打ち消されないよう
                子音区間では声帯を止める (VOT ぶんの遅れは自然)。 */
-            /* 係数更新 (64 サンプルごと) */
+            /* 係数更新。目標値は 64 サンプルごとに決め直し、実際の係数は
+               1 サンプルずつ目標へ近づける (段差があると 750Hz の側帯波が
+               出て「プシュ」という雑音になる)。 */
             if ((s & 63) == 0) {
                 for (int i = 0; i < 5; i++)
-                    reson_set(&r[i], cur.f[i], bw_for(i, cur.bw, f0), sr);
+                    sm_target(&r[i], cur.f[i], bw_for(i, cur.bw, f0), sr, 64.0f);
                 reson_set(&nres, cur.noiseF, cur.noiseBw, sr);
             }
 
@@ -439,7 +477,10 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             f0 += (tf - f0) * glideF0;
             vibPhase++;
             float vib = preset->vibrato * sinf(2.0f * (float)M_PI * 5.2f * (float)vibPhase / sr);
-            jitter = jitter * 0.995f + rnd_next(&rnd) * 0.010f;
+            /* ジッタは「揺らぎ」なので 20ms 程度のゆっくりした動きにとどめる。
+               ここを速く動かすとフォルマントの狭い山を横切るたびに
+               側帯波が出て、母音に「プシュ」という雑音が混ざる。 */
+            jitter = jitter * 0.9995f + rnd_next(&rnd) * 0.0006f;
             float fnow = f0 * powf(2.0f, (vib + jitter) / 12.0f);
 
             /* ---- 声帯励振 (Rosenberg パルスの微分) ----
@@ -449,22 +490,12 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             float exc = glottal_step(&glottal, fnow, sr) * 130.0f;
             /* 声帯パルスの高域を軽く丸める (実際の声道の放射前の減衰) */
             float src = onep_lp(&glottalLp, exc) * cur.voiced;
+            /* 息成分 (有声時のブレス)。声道を通すので「ハスキーさ」になり、
+               生のノイズを足すより自然。 */
+            src += rnd_next(&rnd) * preset->breath * 0.010f * cur.voiced;
 
-            /* 破裂音のバースト。実際の破裂は 5-20ms のノイズの塊なので、
-               インパルス的にならないよう時定数を 10ms 程度にする。
-               (1ms だとピークだけ高くなって、平均音量を押し下げる) */
-            if (clickEnv > 0.001f) {
-                /* 一次の帯域制限で高域だけにする。白色のままバーストを
-                   入れると、共振器の狭い帯域を通過したときの過渡で
-                   鋭いスパイクになり、ピークだけが跳ね上がる。 */
-                burst += (rnd_next(&rnd) - burst) * 0.45f;
-                burstHp += (burst - burstHp) * 0.06f;
-                src += (burst - burstHp) * clickEnv;
-                clickEnv *= 0.99800f;                        /* τ ≈ 10ms */
-            }
-
-            /* ---- 摩擦/息ノイズ ---- */
-            /* 摩擦ノイズ。帯域共振器の出力は入力 (白色雑音, rms≈0.58) に
+            /* ---- 摩擦/破裂ノイズ ----
+               摩擦ノイズ。帯域共振器の出力は入力 (白色雑音, rms≈0.58) に
                対して Q のぶんだけ大きくなるので、生成後に正規化する。 */
             float nz = rnd_next(&rnd);
             float nzBand = reson_run(&nres, nz);
@@ -472,8 +503,16 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             /* 帯域ノイズ: 中心周波数のまわりに集める (実効 rms を一定に) */
             float noise = (nzBand * 1.35f + nzLow * 0.12f) * cur.noise * 4.0f;
 
-            /* 息成分 (有声時のブレス) */
-            noise += rnd_next(&rnd) * preset->breath * 0.04f * cur.voiced;
+            /* ---- 破裂音のバースト ----
+               実際の破裂は 5-10ms の短いノイズ。長く鳴らすと「ぷしゅ」
+               「ふぁ」という息の音になるので、時定数を 6ms にする。
+               帯域は高めに寄せて「カ」「タ」らしくする。 */
+            if (clickEnv > 0.001f) {
+                burst += (rnd_next(&rnd) - burst) * 0.55f;
+                burstHp += (burst - burstHp) * 0.10f;
+                noise += (burst - burstHp) * clickEnv;
+                clickEnv *= 0.99730f;                        /* τ ≈ 6ms */
+            }
 
             /* ---- 並列フォルマントバンク ----
                各フォルマントを独立した共振器で作り、振幅を dB で与えて
@@ -489,7 +528,7 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
                4kHz 以上が -60dB/oct で落ちて「こもる」。
                並列なら高次の枝を足すだけで高域まで設計できる。 */
             float y = src;
-            for (int i = 0; i < 8; i++) y = reson_run(&r[i], y);
+            for (int i = 0; i < 8; i++) y = sm_run(&r[i], y);
             /* ---- 放射特性 (唇): +6dB/oct 相当 ---- */
             float rad = y - 0.90f * prevRad;
             prevRad = y;

@@ -170,6 +170,35 @@ static void test_deterministic(void)
     }
 }
 
+/* 母音に雑音 (「プシュ」という息まじりの音) が混ざっていないか。
+   係数を 64 サンプルごとに段階的に切り替えていた頃は、その境界で
+   波形が不連続になり、高調波のすぐ隣 (F0 の半分ずれた位置) に
+   側帯波が出ていた。今は係数を 1 サンプルずつ動かしているので、
+   側帯波は高調波より 25dB 以上低いはず。 */
+static void test_no_sideband_noise(void)
+{
+    const YkPreset ps = *yk_preset(0);
+    const char *kana[3] = { "あ", "い", "お" };
+    const int K = 8192;
+    for (int i = 0; i < 3; i++) {
+        int n = yk_speak_kana(kana[i], &ps, buf, (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+        if (n < K + SR / 20) continue;
+
+        /* 母音の定常部 */
+        const float *seg = buf + SR / 20;
+        double worst = -999.0;
+        /* 高調波の隣 (F0 の 1/2 だけずらした位置) のレベルを調べる */
+        for (int k = 4; k <= 8; k++) {
+            double f0 = k * (double)ps.pitch;
+            double main = harm_amp(seg, K, SR, f0);
+            double side = harm_amp(seg, K, SR, f0 + ps.pitch * 0.5);
+            double db = 20.0 * log10((side + 1e-12) / (main + 1e-12));
+            if (db > worst) worst = db;
+        }
+        check(worst < -20.0, "%s: 母音に側帯波の雑音がある (%+.0f dB)", kana[i], worst);
+    }
+}
+
 /* 全体の音量が適正か (小さすぎると聞こえない) */
 static void test_loudness(void)
 {
@@ -310,6 +339,7 @@ int main(void)
     test_consonant_balance();
     test_loudness();
     test_deterministic();
+    test_no_sideband_noise();
     test_pause_duration();
     if (failures) {
         printf("\n%d 件のテストが失敗しました\n", failures);

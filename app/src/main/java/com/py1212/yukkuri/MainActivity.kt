@@ -56,7 +56,7 @@ class MainActivity : AppCompatActivity() {
         stopButton = findViewById(R.id.stopButton)
         saveButton = findViewById(R.id.saveButton)
 
-        converter = ReadingConverter(File(applicationInfo.sourceDir))
+        converter = ReadingAssets.fromAssets(assets)
 
         val labels = (0 until NativeEngine.presetCount).map { NativeEngine.presetLabel(it) }
         presetSpinner.adapter = ArrayAdapter(

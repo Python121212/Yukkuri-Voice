@@ -1,6 +1,8 @@
 package com.py1212.yukkuri
 
 import java.io.File
+import android.content.res.AssetManager
+import java.io.InputStream
 
 /**
  * 日本語テキスト -> カタカナ読み。
@@ -13,7 +15,7 @@ import java.io.File
  * 形態素解析 (Viterbi) は行わないが、「東京駅」のような複合語も
  * 最長一致で拾えるため、TTS 用途では十分な精度になる。
  */
-class ReadingConverter(private val assetDir: File) {
+class ReadingConverter(private val openDict: () -> ByteArray) {
 
     private lateinit var data: ByteArray
     private var count: Int = 0
@@ -22,7 +24,7 @@ class ReadingConverter(private val assetDir: File) {
 
     fun load() {
         if (::data.isInitialized) return
-        data = File(assetDir, "reading_dict.bin").readBytes()
+        data = openDict()
         require(data.size > 12 && String(data, 0, 4, Charsets.US_ASCII) == "YKR1") {
             "reading_dict.bin の形式が不正です"
         }

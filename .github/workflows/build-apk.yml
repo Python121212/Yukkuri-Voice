@@ -3,11 +3,14 @@ name: build-apk
 on:
   push:
     branches: ["**"]
+    tags: ["v*"]
   workflow_dispatch:
 
 jobs:
   apk:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -44,17 +47,18 @@ jobs:
           /tmp/ykcli "ゆっくりしていってね" /tmp/test.wav yukkuri --dump | head -5
           ls -la /tmp/test.wav
 
-      - name: Kotlin compile check (errors as annotations)
+      # 失敗の原因をログ API なしでも読めるよう annotation で出す
+      - name: Kotlin unit tests
         run: |
-          mkdir -p /tmp/tsrc
-          gcc -std=c99 -O2 -Icore/include core/src/*.c -c -o /tmp/core_test.o || true
           set +e
-          gradle --no-daemon -p . :app:compileDebugKotlin > /tmp/kotlin.log 2>&1
+          gradle --no-daemon -p . :app:testDebugUnitTest > /tmp/test.log 2>&1
           rc=$?
+          tail -30 /tmp/test.log
           if [ $rc -ne 0 ]; then
-            grep -E "^e: " /tmp/kotlin.log | head -40 | while IFS= read -r line; do echo "::error title=kotlin::$(echo "$line" | sed 's|.*/app/src/main/java/com/py1212/yukkuri/||')"; done
+            grep -E "^e: |FAILED|expected:|What went wrong|Execution failed" /tmp/test.log \
+              | head -30 | while IFS= read -r line; do echo "::error title=test::$(echo "$line" | sed 's|.*/app/src/|app/src/|')"; done
           else
-            echo "::notice title=kotlin::OK"
+            echo "::notice title=tests::OK"
           fi
           exit $rc
 
@@ -66,7 +70,7 @@ jobs:
           tail -40 /tmp/build.log
           if [ $rc -ne 0 ]; then
             grep -E "^e: |CMake Error|FAILURE:|error:|error when building|What went wrong|Execution failed|Caused by:" /tmp/build.log \
-              | head -30 | while IFS= read -r line; do echo "::error title=gradle::$(echo "$line" | sed 's|.*/app/src/main/java/com/py1212/yukkuri/||')"; done
+              | head -30 | while IFS= read -r line; do echo "::error title=gradle::$(echo "$line" | sed 's|.*/app/src/|app/src/|')"; done
           fi
           exit $rc
 
@@ -76,6 +80,7 @@ jobs:
           cp app/build/outputs/apk/debug/*.apk ci-out/ 2>/dev/null || true
           cp /tmp/test.wav ci-out/ 2>/dev/null || true
           ls -la ci-out
+          echo "APK_SIZE=$(stat -c%s ci-out/app-debug.apk 2>/dev/null || echo 0)" >> $GITHUB_ENV
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -83,3 +88,23 @@ jobs:
           name: yukkuri-debug
           path: ci-out/*
           if-no-files-found: warn
+
+      # Releases に APK を添付すると、API 経由で取得できる (sandbox からでも取り出せる)
+      - name: Publish to release
+        if: github.ref_type == 'tag' || github.ref == 'refs/heads/arena/db7172c6-yukkuri-voice'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG="apk-latest"
+          TITLE="Yukkuri Voice (debug APK)"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" ci-out/app-debug.apk --clobber
+            gh release edit "$TAG" --title "$TITLE" --notes "commit ${GITHUB_SHA} / 自動ビルド ($(date -u '+%Y-%m-%d %H:%M UTC'))"
+          else
+            gh release create "$TAG" ci-out/app-debug.apk \
+              --title "$TITLE" \
+              --notes "commit ${GITHUB_SHA} / 自動ビルド" \
+              --prerelease
+          fi
+          gh release view "$TAG" --json assets -q '.assets[] | "asset: \(.name) \(.size)"'

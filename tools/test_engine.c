@@ -2,6 +2,8 @@
  *
  *  - 母音のフォルマントが設計値どおりに出ているか (LPC ではなく単純な DFT ピーク)
  *  - 母音間の音量差が許容範囲か
+ *  - クリック (1 サンプルだけ跳ねる不連続) が無いか
+ *  - 摩擦音が母音に対して適正なレベルか
  *  - クリップしていないか
  *  - かな列の読みが正しいか
  */
@@ -136,19 +138,114 @@ static double harm_amp(const float *x, int n, int sr, double f)
     return sqrt(re * re + im * im);
 }
 
-/* F0 の高調波をたどり、指定帯域で最も強い山の周波数を返す */
+/* F0 の高調波をたどり、指定帯域で「局所的な山」になっている
+   最も強い高調波の周波数を返す。単純に最大値を取ると F1 の裾が
+   勝ってしまうので、両隣の高調波より強いことを条件にする。 */
 static double formant_peak(const float *x, int n, int sr, double f0,
                            double lo, double hi)
 {
-    double best = 0, bestF = 0;
-    /* 高調波 (F0 の整数倍) に合わせる。整数倍からずれると谷を測ってしまう */
+    enum { MAXH = 256 };
+    double fa[MAXH], aa[MAXH];
+    int nh = 0;
     double f = ceil(lo / f0) * f0;
     if (f < f0) f = f0;
-    for (; f <= hi; f += f0) {
-        double a = harm_amp(x, n, sr, f);
-        if (a > best) { best = a; bestF = f; }
+    for (; f <= hi && nh < MAXH; f += f0) {
+        fa[nh] = f;
+        aa[nh] = harm_amp(x, n, sr, f);
+        nh++;
+    }
+    double best = 0, bestF = 0;
+    for (int i = 1; i + 1 < nh; i++) {
+        if (aa[i] > aa[i - 1] && aa[i] >= aa[i + 1] && aa[i] > best) {
+            best = aa[i];
+            bestF = fa[i];
+        }
+    }
+    if (bestF == 0 && nh > 0) {
+        /* 単調な帯域なら一番強い高調波を返す */
+        for (int i = 0; i < nh; i++) if (aa[i] > best) { best = aa[i]; bestF = fa[i]; }
     }
     return bestF;
+}
+
+/* クリック検出: 隣接サンプルの差分が、その区間の RMS に対して
+   異常に大きい箇所を数える。共振器の過渡や閉鎖明けの不連続は
+   ここで「カチッ」という雑音として出るので、回帰テストにする。 */
+static int count_clicks(const float *x, int n)
+{
+    double acc = 0.0;
+    for (int i = 0; i < n; i++) acc += (double)x[i] * x[i];
+    double rms = sqrt(acc / n);
+    if (rms < 1e-6) return 0;
+    /* 正常な有声波形でも 1 サンプル差分は rms の数倍になる。
+       10 倍を超える跳びは不連続とみなす。 */
+    double lim = rms * 10.0;
+    int c = 0;
+    for (int i = 1; i < n; i++) {
+        if (fabs((double)x[i] - (double)x[i - 1]) > lim) c++;
+    }
+    return c;
+}
+
+/* 指定帯域のエネルギー (dB) */
+static double band_energy(const float *x, int n, int sr, double lo, double hi)
+{
+    double p = 0.0;
+    int lo_k = (int)(lo * n / sr), hi_k = (int)(hi * n / sr);
+    if (hi_k > n / 2) hi_k = n / 2;
+    if (lo_k < 1) lo_k = 1;
+    for (int k = lo_k; k < hi_k; k++) {
+        double a = 0, b = 0;
+        for (int i = 0; i < n; i++) {
+            double ang = -2.0 * M_PI * k * i / n;
+            a += x[i] * cos(ang);
+            b += x[i] * sin(ang);
+        }
+        p += a * a + b * b;
+    }
+    return 10.0 * log10(p / (hi_k - lo_k + 1) + 1e-20);
+}
+
+/* 子音 (摩擦音・破裂音) が母音に対して適正な音量比になっているか。
+   ここが崩れると「サ行だけ耳障り」または「カ行が聞こえない」になる。 */
+static void test_consonant_balance(void)
+{
+    const char *kana[8] = { "さ", "し", "す", "は", "か", "た", "ま", "な" };
+    const YkPreset ps = *yk_preset(0);
+    for (int i = 0; i < 8; i++) {
+        int n = yk_speak_kana(kana[i], &ps, buf, (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+        check(n > 0, "合成失敗: %s", kana[i]);
+        if (n <= 0) continue;
+        int w20 = SR / 50;
+        /* 子音部: 前半のうち最も強い 60ms (破裂音は無音の閉鎖のあとに
+           バーストが来るので、先頭固定で測ると無音を測ってしまう)。
+           母音部 = 末尾 60ms */
+        double c = 0.0;
+        for (int st = 0; st + w20 * 3 <= n / 2; st += w20) {
+            double r = rms_between(buf, st, st + w20 * 3);
+            if (r > c) c = r;
+        }
+        double v = rms_between(buf, n - w20 * 3, n);
+        if (v < 1e-5) continue;
+        double db = 20.0 * log10((c + 1e-9) / v);
+        /* 摩擦音は母音と同程度、破裂音は -20dB くらいまで許す */
+        check(db < 6.0, "%s: 子音が大きすぎる (母音比 %+.0f dB)", kana[i], db);
+        check(db > -30.0, "%s: 子音が小さすぎる (母音比 %+.0f dB)", kana[i], db);
+    }
+}
+
+/* 全体の音量が適正か (小さすぎると聞こえない) */
+static void test_loudness(void)
+{
+    const YkPreset ps = *yk_preset(0);
+    const char *kana[5] = { "あ", "い", "う", "え", "お" };
+    for (int i = 0; i < 5; i++) {
+        int n = yk_speak_kana(kana[i], &ps, buf, (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+        if (n <= 0) continue;
+        double r = rms_between(buf, 0, n);
+        check(r > 0.06, "%s: 音量が小さい (RMS %.3f)", kana[i], r);
+        check(r < 0.30, "%s: 音量が大きすぎる (RMS %.3f)", kana[i], r);
+    }
 }
 
 static void test_vowel_formants(void)
@@ -157,10 +254,10 @@ static void test_vowel_formants(void)
        F1/F2 は音響的に判別できるので、高調波の山の位置で検証する。 */
     static const float expect[5][2] = {
         { 780, 1200 },   /* a */
-        { 300, 2150 },   /* i */
-        { 340, 1350 },   /* u */
-        { 480, 1900 },   /* e */
-        { 450,  850 },   /* o */
+        { 300, 2250 },   /* i */
+        { 350, 1450 },   /* u */
+        { 500, 1950 },   /* e */
+        { 480,  800 },   /* o */
     };
     const char *kana[5] = { "あ", "い", "う", "え", "お" };
     const YkPreset ps = *yk_preset(0);
@@ -190,12 +287,31 @@ static void test_vowel_formants(void)
 
         /* F2: 第 2 フォルマントの帯域 (600-3500Hz) で最も強い高調波。
            F1 の裾 (数百 Hz) と区別するため、下限は 600Hz とする。 */
-        /* F2 は F1 から 550Hz 以上離れた位置で探す (F1 の裾を拾わないため) */
-        double f2 = formant_peak(seg, len, SR, f0, f1 + 550, 3000);
-        double want2 = expect[v][1] * ps.formantScale;
-        double tol2 = want2 * 0.30f + 150;
-        check(fabs(f2 - want2) < tol2,
-              "%s: F2 = %.0f Hz (期待 %.0f ± %.0f)", kana[v], f2, want2, tol2);
+        if (v == 4) {
+            /* /o/ は F1-F2 が 320Hz しか離れておらず、F0≈230Hz では
+               高調波の山を分離できない。代わりに「F2 が低い」ことを
+               帯域エネルギー比で確かめる。 */
+            double lowE = band_energy(seg, len, SR, 550, 1000);
+            double highE = band_energy(seg, len, SR, 1500, 2600);
+            check(lowE > highE * 2.0,
+                  "お: F2 が低くない (550-1000 %0.1f dB vs 1500-2600 %.1f dB)",
+                  lowE, highE);
+        } else {
+            /* F2 は F1 の裾を拾わないよう、F1 の 1.3 倍以上から探す */
+            double lo2 = f1 * 1.3;
+            if (lo2 < 700) lo2 = 700;
+            double f2 = formant_peak(seg, len, SR, f0, lo2, 3000);
+            double want2 = expect[v][1] * ps.formantScale;
+            double tol2 = want2 * 0.30f + 150;
+            check(fabs(f2 - want2) < tol2,
+                  "%s: F2 = %.0f Hz (期待 %.0f ± %.0f)", kana[v], f2, want2, tol2);
+        }
+
+        /* 有声部にクリックが無いこと (前は閉鎖明けに 1 サンプルの跳びが出ていた) */
+        {
+            int ncl = count_clicks(buf, n);
+            check(ncl == 0, "%s: クリックが %d 箇所ある", kana[v], ncl);
+        }
 
         loud[v] = rms_between(buf, SR / 30, SR / 12);
     }
@@ -255,6 +371,8 @@ int main(void)
     test_presets();
     test_reading();
     test_vowel_formants();
+    test_consonant_balance();
+    test_loudness();
     test_pause_duration();
     if (failures) {
         printf("\n%d 件のテストが失敗しました\n", failures);

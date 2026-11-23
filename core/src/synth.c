@@ -162,30 +162,6 @@ static inline float glottal_step(Glottal *g, float f0, float sr)
     return d;
 }
 
-/* ---------------- 音源スペクトル表 ---------------- */
-/* 声帯音源 (Rosenberg パルスの微分 + 900Hz の丸め + 唇の放射特性) の
-   振幅特性。200Hz を 0dB とした 1/4 オクターブ刻みの実測値。
-   これを知らないと並列バンクの各枝の強さを決められない。
-   値は 1 周期ぶんの波形から数値的に求めたもの (tools/ltas.py と同じ手法)。 */
-#define SRC_N 27
-static const float YK_SRC_DB[SRC_N] = {
-      0.0f,  0.6f,  0.8f,   1.0f,  1.3f,  1.5f,   0.4f, -1.0f, -2.5f,
-     -4.4f, -6.2f, -8.8f, -12.2f,-14.7f,-14.8f, -15.9f,-18.7f,-19.5f,
-    -21.5f,-22.6f,-24.9f, -26.5f,-28.2f,-30.1f, -31.8f,-34.4f,-37.2f,
-};
-
-/* 1/4 オクターブ刻みの表から周波数 f の値を線形補間で引く */
-static float src_db_at(float f) __attribute__((unused));
-static float src_db_at(float f)
-{
-    if (f < 200.0f) return YK_SRC_DB[0];
-    float x = 4.0f * log2f(f / 200.0f);
-    if (x >= (float)(SRC_N - 1)) return YK_SRC_DB[SRC_N - 1];
-    int k = (int)x;
-    float t = x - (float)k;
-    return YK_SRC_DB[k] * (1.0f - t) + YK_SRC_DB[k + 1] * t;
-}
-
 /* ---------------- 目標パラメータ ---------------- */
 /* 高次フォルマント F6-F8 (固定)。実声道の F6 以上は幅が広い。 */
 static const float YK_HF_F[3] = { 4300.0f, 5800.0f, 7500.0f };
@@ -358,11 +334,11 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     /* 20ms 窓ごとの「有声だったか」を記録しておく。音量の正規化を
        有声音だけで決めるため (摩擦音だけで決めると母音が埋もれる)。 */
     float *winVoiced = NULL;
-    float *voicedHist = (float *)malloc(sizeof(float) * (size_t)(total > 0 ? total : 1));
+    float *voicedHist = (float *)calloc((size_t)(total > 0 ? total : 1), sizeof(float));
     /* 摩擦音は有声部と別に貯めて、最後に「母音に対する相対レベル」で混ぜる。
        同じバッファで正規化すると、母音の素の音量が小さい母音 (う, お) の
        ときに摩擦音だけが持ち上がって耳障りになる。 */
-    float *noiseBuf = (float *)malloc(sizeof(float) * (size_t)(total > 0 ? total : 1));
+    float *noiseBuf = (float *)calloc((size_t)(total > 0 ? total : 1), sizeof(float));
     float prevRadN = 0.0f;
 
     float clickEnv = 0.0f;
@@ -419,6 +395,8 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             for (int i = 0; i < 8; i++) yy = reson_run(&r[i], 0.0f);
             prevRad = yy;
             out[pos] = 0.0f;
+            if (noiseBuf) noiseBuf[pos] = 0.0f;
+            if (voicedHist) voicedHist[pos] = 0.0f;
         }
         if (is_stop(p))
             clickEnv = (p == YK_P_P || p == YK_P_T || p == YK_P_K) ? 0.55f : 0.30f;

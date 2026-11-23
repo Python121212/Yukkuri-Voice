@@ -234,6 +234,25 @@ static void test_consonant_balance(void)
     }
 }
 
+/* 同じ入力からは必ず同じ波形が出ること。
+   内部バッファの未初期化領域を読むバグ (ノイズが混ざって結果が変わる) は
+   これで捕まえる。 */
+static void test_deterministic(void)
+{
+    static float buf2[YK_SR * 30];
+    const YkPreset ps = *yk_preset(0);
+    const char *kana[3] = { "か", "さ", "ゆっくり" };
+    for (int i = 0; i < 3; i++) {
+        int n1 = yk_speak_kana(kana[i], &ps, buf, (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+        int n2 = yk_speak_kana(kana[i], &ps, buf2, (int)(sizeof(buf2) / sizeof(buf2[0])), NULL, 0);
+        check(n1 == n2, "%s: 出力長が一致しない (%d vs %d)", kana[i], n1, n2);
+        if (n1 != n2) continue;
+        int diff = 0;
+        for (int k = 0; k < n1; k++) if (buf[k] != buf2[k]) diff++;
+        check(diff == 0, "%s: 出力が非決定的 (%d サンプルが不一致)", kana[i], diff);
+    }
+}
+
 /* 全体の音量が適正か (小さすぎると聞こえない) */
 static void test_loudness(void)
 {
@@ -373,6 +392,7 @@ int main(void)
     test_vowel_formants();
     test_consonant_balance();
     test_loudness();
+    test_deterministic();
     test_pause_duration();
     if (failures) {
         printf("\n%d 件のテストが失敗しました\n", failures);

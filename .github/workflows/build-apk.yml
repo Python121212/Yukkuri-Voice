@@ -52,9 +52,8 @@ jobs:
           tail -60 /tmp/build.log
           if [ $rc -ne 0 ]; then
             # ログ API が使えない環境でも原因が分かるように、要点を annotation で出す
-            grep -E "^e: |error:|Caused by:|What went wrong|^> |FAILURE|Unresolved|Execution failed" /tmp/build.log \
-              | head -25 | while IFS= read -r line; do echo "::error title=gradle::$line"; done
-            tail -40 /tmp/build.log | while IFS= read -r line; do echo "::warning title=tail::$line"; done
+            grep -E "e: file|e: |error:|Unresolved reference|What went wrong|Execution failed" /tmp/build.log \
+              | grep -v "deprecated" | head -30 | while IFS= read -r line; do echo "::error title=gradle::$line"; done
           fi
           exit $rc
 

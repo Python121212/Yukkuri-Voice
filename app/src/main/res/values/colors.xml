@@ -1,0 +1,6 @@
+<resources>
+    <color name="yukkuri_primary">#C77DBA</color>
+    <color name="yukkuri_container">#F7DDEF</color>
+    <color name="yukkuri_on_container">#3A1B33</color>
+    <color name="yukkuri_bg">#FFF8FC</color>
+</resources>

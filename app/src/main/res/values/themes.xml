@@ -1,0 +1,8 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.Yukkuri" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/yukkuri_primary</item>
+        <item name="colorPrimaryContainer">@color/yukkuri_container</item>
+        <item name="colorOnPrimaryContainer">@color/yukkuri_on_container</item>
+        <item name="android:statusBarColor" tools:targetApi="l">@color/yukkuri_primary</item>
+    </style>
+</resources>

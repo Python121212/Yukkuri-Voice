@@ -2,23 +2,11 @@
   "name": "yukkuri-voice",
   "private": true,
   "version": "0.1.0",
-  "type": "module",
-  "description": "A from-scratch formant-synthesis TTS engine tuned for the Yukkuri voice",
+  "description": "A from-scratch formant-synthesis TTS engine tuned for the Yukkuri voice (Android native)",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc --noEmit && vite build",
-    "preview": "vite preview --host 0.0.0.0",
-    "typecheck": "tsc --noEmit",
-    "dict": "node scripts/copy-dict.mjs",
-    "lab": "tsx scripts/lab.ts"
+    "dict": "node scripts/build-dict.mjs"
   },
   "dependencies": {
     "kuromoji": "0.1.2"
-  },
-  "devDependencies": {
-    "@types/kuromoji": "0.1.3",
-    "tsx": "4.19.2",
-    "typescript": "5.7.2",
-    "vite": "6.0.7"
   }
 }

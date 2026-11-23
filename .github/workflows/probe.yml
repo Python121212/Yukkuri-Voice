@@ -1,0 +1,10 @@
+name: probe
+on: [push, workflow_dispatch]
+jobs:
+  env:
+    runs-on: ubuntu-latest
+    steps:
+      - run: java -version
+      - run: echo "ANDROID_HOME=$ANDROID_HOME"; ls $ANDROID_HOME
+      - run: cat $(find / -name "package.xml" -path "*android*" 2>/dev/null | head -1) 2>/dev/null | head -5
+      - run: ls $ANDROID_HOME/platforms $ANDROID_HOME/build-tools 2>/dev/null

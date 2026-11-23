@@ -111,6 +111,38 @@ static inline float reson_run(Reson *r, float x)
     return y;
 }
 
+/* ---------------- 二次ローパス (バターワース) ---------------- */
+/* 破裂音の破裂を 1-4kHz に収めるために使う。一次だと -6dB/oct しか
+   落ちないので、高域が残って「プスッ」と金属的に鳴る。 */
+typedef struct {
+    float b0, b1, b2, a1, a2;
+    float x1, x2, y1, y2;
+} BiquadLp;
+
+static void biquad_lp_reset(BiquadLp *f) { f->x1 = f->x2 = f->y1 = f->y2 = 0.0f; }
+
+static void biquad_lp_set(BiquadLp *f, float fc, float sr)
+{
+    const float w0 = 2.0f * (float)M_PI * fc / sr;
+    const float cw = cosf(w0);
+    const float alpha = sinf(w0) / (2.0f * 0.7071f);
+    const float a0 = 1.0f + alpha;
+    f->b0 = (1.0f - cw) * 0.5f / a0;
+    f->b1 = (1.0f - cw) / a0;
+    f->b2 = (1.0f - cw) * 0.5f / a0;
+    f->a1 = -2.0f * cw / a0;
+    f->a2 = (1.0f - alpha) / a0;
+}
+
+static inline float biquad_lp_run(BiquadLp *f, float x)
+{
+    float y = f->b0 * x + f->b1 * f->x1 + f->b2 * f->x2
+            - f->a1 * f->y1 - f->a2 * f->y2;
+    f->x2 = f->x1; f->x1 = x;
+    f->y2 = f->y1; f->y1 = y;
+    return y;
+}
+
 /* ---------------- 一次フィルタ ---------------- */
 typedef struct { float y, a; } OnePole;
 
@@ -307,12 +339,17 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     reson_set(&nres, 4000, 2000, sr);
 
     OnePole glottalLp, radLp, noiseLp;
+    BiquadLp radNLp;        /* 摩擦/破裂ノイズの帯域制限 */
     memset(&glottalLp, 0, sizeof(glottalLp));
     memset(&radLp, 0, sizeof(radLp));
     memset(&noiseLp, 0, sizeof(noiseLp));
+    biquad_lp_reset(&radNLp);
     onep_set(&glottalLp, 900.0f, sr);     /* 声帯パルスの丸め */
     onep_set(&radLp, 15000.0f, sr);       /* 放射後の高域の歯止め */
     onep_set(&noiseLp, 2500.0f, sr);
+    /* 破裂音の破裂は 1-4kHz が主成分。高域まで通すと「プスッ」と
+       金属的に鳴るので 2 次で 3.5kHz から落とす。 */
+    biquad_lp_set(&radNLp, 3500.0f, sr);
 
     Rnd rnd = { 0x9E3779B9u };
 
@@ -370,6 +407,8 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     float prevRadN = 0.0f;
 
     float clickEnv = 0.0f;
+    float clickAtk = 0.0f;                 /* 破裂の立ち上がり包絡 */
+    const float clickAtkStep = 1.0f / (0.0008f * sr);
     float burst = 0.0f;
     float burstHp = 0.0f;
     float hFriction = 0.0f;    /* 摩擦音の「息の強さ」を別経路でも反映 */
@@ -426,13 +465,28 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             float yy = 0.0f;
             for (int i = 0; i < 8; i++) yy = sm_run(&r[i], 0.0f);
             prevRad = yy;
+            /* ノイズ経路の状態も落とす。ここを残すと、閉鎖明けの
+               1 サンプル目で radN = noise - 0.9*prevRadN が古い値との
+               差で跳ね、「プッ」というクリックになる。 */
+            prevRadN = 0.0f;
+            burst = 0.0f;
+            burstHp = 0.0f;
+            biquad_lp_reset(&radNLp);
             out[pos] = 0.0f;
             if (noiseBuf) noiseBuf[pos] = 0.0f;
             if (voicedHist) voicedHist[pos] = 0.0f;
         }
-        if (is_stop(p))
-            clickEnv = (p == YK_P_P || p == YK_P_T || p == YK_P_K) ? 0.55f : 0.30f;
+        if (is_stop(p)) {
+            clickEnv = (p == YK_P_P || p == YK_P_T || p == YK_P_K) ? 1.00f : 0.45f;
+            clickAtk = 0.0f;
+        }
         else if (p == YK_P_Z || p == YK_P_J) clickEnv = 0.10f;
+        /* 有声破裂音 (が/だ/ば) は閉鎖明けに声帯が最大振幅でいきなり入る。
+           その 1 サンプルの段差が「プッ」というクリックになるので、
+           本体の先頭 4ms に立ち上がりを付ける。無声破裂のバーストは
+           clickAtk 側で別に立ち上げているので、ここでは触らない。 */
+        const int voiceAtk = (p == YK_P_B || p == YK_P_D || p == YK_P_G);
+        const long bodyStart = pos;
 
         /* ---- 本体 ---- */
         /* 母音は長めに取る。短すぎると共鳴が立ち上がりきる前に次の
@@ -507,11 +561,16 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
                実際の破裂は 5-10ms の短いノイズ。長く鳴らすと「ぷしゅ」
                「ふぁ」という息の音になるので、時定数を 6ms にする。
                帯域は高めに寄せて「カ」「タ」らしくする。 */
-            if (clickEnv > 0.001f) {
-                burst += (rnd_next(&rnd) - burst) * 0.55f;
-                burstHp += (burst - burstHp) * 0.10f;
-                noise += (burst - burstHp) * clickEnv;
-                clickEnv *= 0.99730f;                        /* τ ≈ 6ms */
+            if (clickEnv > 0.0001f) {
+                burst += (rnd_next(&rnd) - burst) * 0.90f;
+                burstHp += (burst - burstHp) * 0.20f;
+                /* 立ち上がり (1.5ms) を付ける。いきなり最大振幅の乱数から
+                   始めると、その 1 サンプルの段差が「プッ」というクリックに
+                   なる。実際の破裂も 1-2ms かけて立ち上がる。 */
+                if (clickAtk < 1.0f) clickAtk += clickAtkStep;
+                if (clickAtk > 1.0f) clickAtk = 1.0f;
+                noise += (burst - burstHp) * clickEnv * clickAtk;
+                clickEnv *= 0.99270f;                        /* τ ≈ 2.5ms */
             }
 
             /* ---- 並列フォルマントバンク ----
@@ -537,6 +596,7 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             if (noiseBuf) {
                 radN = noise - 0.90f * prevRadN;
                 prevRadN = noise;
+                radN = biquad_lp_run(&radNLp, radN);
             }
             /* 明るさ補正: 折れ点より上を一定量持ち上げるシェルフ。
                減算で作ったハイパスを足すと、高域でゲインが kShelf に
@@ -552,6 +612,15 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             out[pos] = rad * cur.amp * ph->amp * cur.gain;
             if (noiseBuf) noiseBuf[pos] = radN * cur.amp;
             if (voicedHist) voicedHist[pos] = cur.voiced;
+        }
+
+        if (voiceAtk) {
+            long len = (long)(0.004f * sr);
+            if (len > pos - bodyStart) len = pos - bodyStart;
+            for (long k = 0; k < len; k++) {
+                float w = 0.5f - 0.5f * cosf((float)M_PI * (float)k / (float)(len > 1 ? len - 1 : 1));
+                out[bodyStart + k] *= w;
+            }
         }
     }
 
@@ -715,6 +784,47 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             float g = 1.0f;
             if (env > thresh) g = thresh / env;
             out[i] *= g;
+        }
+    }
+
+    /* ---- 語尾の減衰 (「プツ」対策) ----
+       母音や摩擦音が大きい振幅のまま切れて無音に入ると、波形が
+       いきなり 0 になる段差が「プツ」というクリックになる。
+       1ms ごとの RMS 包絡で無音区間を見つけ、その直前 40ms を
+       コサインで滑らかに落とす。サンプル値ではなく包絡で判定するので、
+       ゼロクロスを無音と誤認しない。立ち上がりには触らない。 */
+    if (pos > 0) {
+        const long hop = (long)(0.001f * sr) > 0 ? (long)(0.001f * sr) : 1;
+        const long nh = pos / hop + 1;
+        const long rel = (long)(0.040f * sr);
+        for (long h = 1; h < nh; h++) {
+            long b = h * hop;
+            if (b >= pos) break;
+            /* この 1ms が無音か */
+            double e = 0.0;
+            for (long i = b; i < b + hop && i < pos; i++) e += (double)out[i] * out[i];
+            if (sqrt(e / (double)hop) > 0.0015) continue;
+            /* 直前に続いていた有音の終端 = b。その手前を下げる。 */
+            long len = rel;
+            if (len > b) len = b;
+            /* k=0 が無音の直前 (= 一番新しい) なので、そこを最小に、
+               過去 (k=len-1) に向かって 1 に戻す。 */
+            for (long k = 0; k < len; k++) {
+                long idx = b - 1 - k;
+                float w = 0.5f - 0.5f * cosf((float)M_PI * (float)k / (float)(len > 1 ? len - 1 : 1));
+                if (w > 1.0f) w = 1.0f;
+                if (w < 0.0f) w = 0.0f;
+                out[idx] *= w;
+            }
+            /* 無音が続く限り同じ場所を何度も削らないよう、次の有音まで飛ばす */
+            while (h < nh) {
+                long bb = h * hop;
+                if (bb + hop >= pos) { h = nh; break; }
+                double e2 = 0.0;
+                for (long i = bb; i < bb + hop; i++) e2 += (double)out[i] * out[i];
+                if (sqrt(e2 / (double)hop) > 0.0015) break;
+                h++;
+            }
         }
     }
 

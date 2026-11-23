@@ -34,87 +34,6 @@ static void check(int cond, const char *fmt, ...)
     va_end(ap);
 }
 
-/* フォルマント推定:
-   1. ケプストラムでスペクトル包絡を作る
-   2. 包絡の形状から F0 の高調波を除く (ピークが F0 間隔で並んでいたら高調波)
-   3. 残った「広い山」を F1, F2 とする
-   テスト用途なので、設計値との一致を確かめられれば十分。 */
-static void estimate_formants(const float *x, int n, int sr, float *out, int *nout)
-{
-    const int K = 4096;
-    static double w[4096];
-    double mean = 0;
-    int len = n < K ? n : K;
-    for (int i = 0; i < len; i++) mean += x[i];
-    mean /= len;
-    for (int i = 0; i < K; i++) {
-        double v = (i < len) ? x[i] - mean : 0.0;
-        w[i] = v * (0.5 - 0.5 * cos(2.0 * M_PI * i / (K - 1)));
-    }
-    static double re[2048], im[2048], logm[2048];
-    for (int k = 0; k < K / 2; k++) {
-        double a = 0, b = 0;
-        for (int i = 0; i < K; i++) {
-            double ang = -2.0 * M_PI * k * i / K;
-            a += w[i] * cos(ang);
-            b += w[i] * sin(ang);
-        }
-        re[k] = a; im[k] = b;
-        logm[k] = log(sqrt(a * a + b * b) + 1e-12);
-    }
-    /* ケプストラム (対称性を使って実数の逆変換で戻す) */
-    static double cep[4096];
-    for (int q = 0; q < K; q++) {
-        double s = 0;
-        for (int k = 0; k < K / 2; k++)
-            s += logm[k] * cos(2.0 * M_PI * q * k / K);
-        cep[q] = s / (K / 2);
-    }
-    /* lifter: 1.2ms より遅い成分 (細かい高調波) を捨てる */
-    int lifter = (int)(0.0012 * sr);
-    if (lifter < 8) lifter = 8;
-    for (int q = lifter; q < K - lifter; q++) cep[q] = 0;
-    /* 逆変換して包絡を得る */
-    static double env[2048];
-    for (int k = 0; k < K / 2; k++) {
-        double s = cep[0];
-        for (int q = 1; q < lifter; q++)
-            s += 2.0 * cep[q] * cos(2.0 * M_PI * q * k / K);
-        env[k] = s;
-    }
-    /* 包絡の局所ピークを拾う */
-    typedef struct { double v; double f; } Pk;
-    Pk pk[128];
-    int np = 0;
-    for (int k = 2; k < K / 2 - 2; k++) {
-        if (env[k] > env[k - 1] && env[k] >= env[k + 1]) {
-            double f = (double)k * sr / K;
-            if (f < 250 || f > 4200) continue;
-            if (np < 128) { pk[np].v = env[k]; pk[np].f = f; np++; }
-        }
-    }
-    /* 強い順 */
-    for (int i = 1; i < np; i++) {
-        Pk v = pk[i]; int j = i - 1;
-        while (j >= 0 && pk[j].v < v.v) { pk[j + 1] = pk[j]; j--; }
-        pk[j + 1] = v;
-    }
-    /* 200Hz 以内は同一フォルマントとみなす */
-    int c = 0;
-    for (int i = 0; i < np && c < 3; i++) {
-        int ok = 1;
-        for (int j = 0; j < c; j++)
-            if (fabs(out[j] - pk[i].f) < 200) ok = 0;
-        if (ok) out[c++] = (float)pk[i].f;
-    }
-    for (int i = 1; i < c; i++) {
-        float v = out[i]; int j = i - 1;
-        while (j >= 0 && out[j] > v) { out[j + 1] = out[j]; j--; }
-        out[j + 1] = v;
-    }
-    *nout = c;
-}
-
 static double rms_between(const float *x, int a, int b)
 {
     double acc = 0;
@@ -122,8 +41,6 @@ static double rms_between(const float *x, int a, int b)
     return sqrt(acc / (b - a));
 }
 
-/* 有声区間のスペクトル包絡を「F0 の高調波の振幅」から作る。
-   有声源は高調波構造を持つので、高調波だけを見ればフォルマントが読める。 */
 static double harm_amp(const float *x, int n, int sr, double f)
 {
     const int K = 4096;

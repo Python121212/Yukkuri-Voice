@@ -76,6 +76,7 @@ typedef struct {
     float amp;
     float noiseF;     /* ノイズの中心周波数 (摩擦音の帯域) */
     float noiseBw;
+    float gain;       /* 音素ごとの音量補正 (共振器の減衰差を吸収) */
 } Frame;
 
 static void frame_for_phone(YkPhone p, const YkPreset *ps, Frame *fr)
@@ -87,8 +88,9 @@ static void frame_for_phone(YkPhone p, const YkPreset *ps, Frame *fr)
     fr->noise = pi->noise;
     fr->noiseHp = pi->noiseHp;
     fr->amp = pi->amp;
-    fr->noiseF = 4500.0f;
-    fr->noiseBw = 2500.0f;
+    fr->gain = pi->gain > 0 ? pi->gain : 1.0f;
+    fr->noiseF = pi->noiseF > 0 ? pi->noiseF : 4000.0f;
+    fr->noiseBw = pi->noiseBw > 0 ? pi->noiseBw : 2500.0f;
     if (p <= YK_P_O) {
         for (int i = 0; i < 5; i++) fr->f[i] = YK_VOWEL_F[p][i] * ps->formantScale;
     } else if (pi->formant[0] > 0) {
@@ -127,6 +129,7 @@ static float closure_ms(YkPhone p)
     switch (p) {
     case YK_P_P: case YK_P_T: case YK_P_K: return 60.0f;
     case YK_P_B: case YK_P_D: case YK_P_G: return 45.0f;
+    case YK_P_GLOTTAL: return 18.0f;
     default: return 0.0f;
     }
 }
@@ -160,16 +163,16 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     Reson r[5];
     for (int i = 0; i < 5; i++) { reson_clear(&r[i]); reson_set(&r[i], 500, 90, sr); }
     Reson nres; reson_clear(&nres); reson_set(&nres, 4500, 2500, sr);
-    OneS srcLp, outLp, nzHp;
+    OneS srcLp = {0.0f, 0.0f}, outLp = {0.0f, 0.0f};
     onep_set(&srcLp, 1400, sr);
     onep_set(&outLp, 9000, sr);
-    onep_set(&nzHp, 1500, sr);
 
     Rnd rnd = { 0x2545F491u };
     float phase = 0.0f;
     Frame cur, target;
     frame_for_phone(YK_P_O, preset, &cur);
     memset(&target, 0, sizeof(target));
+    target.gain = cur.gain = 1.0f;
 
     const float glide    = 1.0f - expf(-1.0f / (0.016f * sr));
     const float glideAmp = 1.0f - expf(-1.0f / (0.010f * sr));
@@ -179,6 +182,7 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     float ampLevel = 0.0f;
     float clickEnv = 0.0f;
     float prevY = 0.0f;
+    float prevSrc = 0.0f;
     float jitter = 0.0f;
     long vibPhase = 0;
     long closureLeft = 0;
@@ -216,6 +220,7 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
         for (long s = 0; s < n_clo && pos < total; s++, pos++) {
             cur.voiced *= (1.0f - glideAmp);
             cur.noise  *= (1.0f - glideAmp);
+            cur.gain += (target.gain - cur.gain) * glideAmp;
             ampLevel   *= (1.0f - glideAmp);
             float y = 0.0f;
             for (int i = 0; i < 5; i++) y = reson_run(&r[i], y);
@@ -237,19 +242,37 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             float tVoiced = isPause ? 0.0f : target.voiced;
             cur.voiced += (tVoiced - cur.voiced) * (isVowel ? glideAmp * 0.6f : glideAmp);
             cur.amp += (target.amp - cur.amp) * glideAmp;
+            cur.gain += (target.gain - cur.gain) * glideAmp;
             cur.noise += (target.noise - cur.noise) * glideAmp;
             cur.noiseHp += (target.noiseHp - cur.noiseHp) * glideAmp;
-            cur.noiseF += (target.noiseF - cur.noiseF) * glide; /* 摩擦音の帯域移動は無視できる程度 */
+            cur.noiseF += (target.noiseF - cur.noiseF) * glide;
             cur.noiseBw += (target.noiseBw - cur.noiseBw) * glide;
 
             /* ---- 共振器 ---- */
-            if ((s & 31) == 0) {
+            /* パラメータがほぼ静止しているときは係数を更新しない
+               (毎 30 サンプルで更新すると、減衰しきらないうちに係数が変わり不安定になる) */
+            float motion = 0.0f;
+            for (int i = 0; i < 5; i++) motion += fabsf(target.f[i] - cur.f[i]);
+            motion += fabsf(target.bw - cur.bw) * 3.0f;
+            int needUpdate = (s & 31) == 0 && (motion > 1.0f || (s == 0));
+            if (needUpdate) {
                 for (int i = 0; i < 5; i++) {
-                    float bw = cur.bw * (1.0f + 0.5f * (float)i);
+                    /* 帯域幅: 低次のフォルマントほど狭く、高次は広く。
+                       Q = f/bw が高すぎると F0 付近の成分が暴走するので上限を設ける。 */
+                    float bw = cur.bw * (1.0f + 0.45f * (float)i);
+                    if (bw < 60.0f) bw = 60.0f;
                     float f = cur.f[i];
-                    if (f < 120.0f) f = 120.0f;
+                    if (f < 200.0f) f = 200.0f;
+                    if (f > 0.45f * sr) f = 0.45f * sr;
+                    /* F1/F2 は Q を抑える (F0 付近の発振防止)、F3 以降は自然な狭帯域で OK */
+                    if (i <= 1 && f / bw > 12.0f) bw = f / 12.0f;
                     reson_set(&r[i], f, bw, sr);
                 }
+                /* 摩擦音のノイズを帯域に乗せる */
+                float nf = cur.noiseF;
+                if (nf > 0.44f * sr) nf = 0.44f * sr;
+                if (nf < 200.0f) nf = 200.0f;
+                reson_set(&nres, nf, cur.noiseBw + 200.0f, sr);
             }
 
             /* ---- F0 ---- */
@@ -275,30 +298,34 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
                 clickEnv *= 0.9985f;
             }
 
-            /* ---- ノイズ ---- */
+            /* ---- ノイズ源 (摩擦/破裂) ---- */
             float nz = rnd_next(&rnd);
-            if (cur.noiseHp > 0.001f) {
-                float hp = nz - onep_lp(&nzHp, nz);
-                nz = hp * cur.noiseHp + nz * (1.0f - cur.noiseHp) * 0.6f;
-            }
-            float noise = nz * cur.noise;
 
             /* 息成分 */
             src += rnd_next(&rnd) * preset->breath * 0.05f * cur.voiced;
 
-            float x = src + noise;
+            /* ---- カスケード共振器 ----
+               フォルマントを 3 段まで通す (F1-F3 が声質の主要成分)。
+               F4/F5 は狭帯域で減衰が大きく、カスケードすると非対称な応答で
+               発散しやすいので、代わりに「明るさ」として一次の高域成分を足す。
+               摩擦ノイズは前腔 (F2 まで) を通す。 */
+            float y = reson_run(&r[0], src);
+            y = reson_run(&r[1], y);
+            y += reson_run(&nres, nz) * cur.noise * 1.6f;
+            y = reson_run(&r[2], y);
+            float bright = src - 0.85f * prevSrc;
+            prevSrc = src;
+            y += onep_lp(&outLp, bright) * 0.22f * cur.voiced;
 
-            /* ---- カスケード共振器 ---- */
-            float y = x;
-            for (int i = 0; i < 5; i++) y = reson_run(&r[i], y);
-
-            /* ---- 放射特性 (微分) ---- */
-            float outS = onep_lp(&outLp, y - prevY);
+            /* ---- 放射特性 ----
+               唇の放射は +6dB/oct。差分 (微分) は高域を持ち上げるが、
+               フォルマントのピーク近傍で暴れやすいので弱めの傾斜にする。 */
+            float outS = y - 0.62f * prevY;
             prevY = y;
 
             float tAmp = cur.amp * ph->amp;
             ampLevel += (tAmp - ampLevel) * glideAmp;
-            out[pos] = outS * ampLevel;
+            out[pos] = outS * ampLevel * cur.gain;
         }
     }
 
@@ -311,12 +338,57 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
         out[i] = y;
     }
 
-    /* ---- 自動ゲイン: 有声区間の 99.5% ピークを 0.80 に ---- */
-    float peak = 0.0f;
-    for (long i = 0; i < pos; i++) { float a = fabsf(out[i]); if (a > peak) peak = a; }
-    if (peak > 1e-5f) {
-        float g = 0.80f / peak;
-        for (long i = 0; i < pos; i++) out[i] *= g;
+    /* ---- 音量の正規化 ----
+       ピークではなく「短時間 RMS の 95 パーセンタイル」を基準にする。
+       破裂音のバーストやクリックで全体が小さくなるのを防ぎつつ、
+       母音どうしの自然な音量差は残す。 */
+    {
+        const long win = (long)(0.020f * sr);
+        const long hop = win;
+        const long nwin = pos / hop;
+        if (nwin > 0) {
+            float *rms = (float *)malloc(sizeof(float) * (size_t)nwin);
+            if (rms) {
+                for (long w = 0; w < nwin; w++) {
+                    double acc = 0.0;
+                    for (long i = w * hop; i < (w + 1) * hop; i++)
+                        acc += (double)out[i] * out[i];
+                    rms[w] = (float)sqrt(acc / (double)hop);
+                }
+                /* 部分ソートで 75% 値を求める */
+                float *tmp = (float *)malloc(sizeof(float) * (size_t)nwin);
+                if (tmp) {
+                    for (long i = 0; i < nwin; i++) tmp[i] = rms[i];
+                    for (long i = 1; i < nwin; i++) {
+                        float v = tmp[i]; long j = i - 1;
+                        while (j >= 0 && tmp[j] > v) { tmp[j + 1] = tmp[j]; j--; }
+                        tmp[j + 1] = v;
+                    }
+                    float ref = tmp[(nwin * 3) / 4];
+                    free(tmp);
+                    if (ref > 1e-9f) {
+                        float g = 0.14f / ref;   /* 有声区間の RMS 目標 */
+                        if (g < 1e-3f) g = 1e-3f;
+                        if (g > 1e6f) g = 1e6f;
+                        for (long i = 0; i < pos; i++) out[i] *= g;
+                    }
+                }
+                free(rms);
+            }
+        }
+    }
+
+    /* ---- 最終リミッタ: ピークを 0.85 以下に ---- */
+    {
+        float peak = 0.0f;
+        for (long i = 0; i < pos; i++) {
+            float a = fabsf(out[i]);
+            if (a > peak) peak = a;
+        }
+        if (peak > 0.85f) {
+            float g = 0.85f / peak;
+            for (long i = 0; i < pos; i++) out[i] *= g;
+        }
     }
 
     /* ---- ソフトクリップ ---- */

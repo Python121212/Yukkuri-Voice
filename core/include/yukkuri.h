@@ -51,6 +51,7 @@ typedef enum {
     YK_P_S, YK_P_SH, YK_P_H, YK_P_F,               /* 摩擦音 */
     YK_P_Z, YK_P_J,                                /* 破擦/摩擦 (有声) */
     YK_P_R, YK_P_Y, YK_P_W,                        /* 半母音・流音 */
+    YK_P_GLOTTAL,                                  /* 母音の前の軽い声門破裂 (あ 行・母音連続) */
     YK_P_PAUSE,                                    /* 句読点などの休止 */
     YK_P_COUNT
 } YkPhone;
@@ -64,7 +65,10 @@ typedef struct {
     float amp;            /* 振幅 */
     float noise;          /* 摩擦/息ノイズ量 */
     float noiseHp;        /* ノイズの高域寄せ (0..1) */
+    float noiseF;         /* ノイズの中心周波数 [Hz] */
+    float noiseBw;        /* ノイズの帯域幅 [Hz] */
     float dur;            /* 既定長 [ms] */
+    float gain;           /* 音量補正 (共振器の減衰差を吸収, 1.0 基準) */
 } YkPhoneInfo;
 
 const YkPhoneInfo *yk_phone_info(YkPhone p);
@@ -77,6 +81,7 @@ typedef struct {
     float   dur;      /* 長さ [ms] (ポーズ・無音を含む) */
     float   f0;       /* その音素の F0 [Hz] */
     float   amp;      /* 0..1 の音量係数 (アクセント) */
+    float   glide;    /* 直前のフォルマントからの遷移時間 [ms] (0 なら既定値) */
 } YkPhoneme;
 
 typedef struct {

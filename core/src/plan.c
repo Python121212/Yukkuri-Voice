@@ -36,34 +36,62 @@ typedef struct {
 } KanaDef;
 
 #define NN 0xFF
+/* ひらがな (カタカナは -0x60 して写像) */
 static const KanaDef KANA[] = {
+    /* 母音 */
     {0x3042, NN, YK_P_A, 0}, {0x3044, NN, YK_P_I, 0}, {0x3046, NN, YK_P_U, 0},
     {0x3048, NN, YK_P_E, 0}, {0x304A, NN, YK_P_O, 0},
+    /* か行 */
     {0x304B, YK_P_K, YK_P_A, 0}, {0x304D, YK_P_K, YK_P_I, 0}, {0x304F, YK_P_K, YK_P_U, 0},
     {0x3051, YK_P_K, YK_P_E, 0}, {0x3053, YK_P_K, YK_P_O, 0},
+    /* が行 */
+    {0x304C, YK_P_G, YK_P_A, 0}, {0x304E, YK_P_G, YK_P_I, 0}, {0x3050, YK_P_G, YK_P_U, 0},
+    {0x3052, YK_P_G, YK_P_E, 0}, {0x3054, YK_P_G, YK_P_O, 0},
+    /* さ行 */
     {0x3055, YK_P_S, YK_P_A, 0}, {0x3057, YK_P_SH, YK_P_I, 0}, {0x3059, YK_P_S, YK_P_U, 0},
     {0x305B, YK_P_S, YK_P_E, 0}, {0x305D, YK_P_S, YK_P_O, 0},
+    /* ざ行 */
+    {0x3056, YK_P_Z, YK_P_A, 0}, {0x3058, YK_P_J, YK_P_I, 0}, {0x305A, YK_P_Z, YK_P_U, 0},
+    {0x305C, YK_P_Z, YK_P_E, 0}, {0x305E, YK_P_Z, YK_P_O, 0},
+    /* た行 */
     {0x305F, YK_P_T, YK_P_A, 0}, {0x3061, YK_P_T, YK_P_I, 0}, {0x3064, YK_P_T, YK_P_U, 0},
     {0x3066, YK_P_T, YK_P_E, 0}, {0x3068, YK_P_T, YK_P_O, 0},
+    /* だ行 */
+    {0x3060, YK_P_D, YK_P_A, 0}, {0x3062, YK_P_J, YK_P_I, 0}, {0x3065, YK_P_Z, YK_P_U, 0},
+    {0x3067, YK_P_D, YK_P_E, 0}, {0x3069, YK_P_D, YK_P_O, 0},
+    /* な行 */
     {0x306A, YK_P_NG, YK_P_A, 0}, {0x306B, YK_P_NG, YK_P_I, 0}, {0x306C, YK_P_NG, YK_P_U, 0},
     {0x306D, YK_P_NG, YK_P_E, 0}, {0x306E, YK_P_NG, YK_P_O, 0},
+    /* は行 */
     {0x306F, YK_P_H, YK_P_A, 0}, {0x3072, YK_P_H, YK_P_I, 0}, {0x3075, YK_P_F, YK_P_U, 0},
     {0x3078, YK_P_H, YK_P_E, 0}, {0x307B, YK_P_H, YK_P_O, 0},
+    /* ば行 */
+    {0x3070, YK_P_B, YK_P_A, 0}, {0x3073, YK_P_B, YK_P_I, 0}, {0x3076, YK_P_B, YK_P_U, 0},
+    {0x3079, YK_P_B, YK_P_E, 0}, {0x307C, YK_P_B, YK_P_O, 0},
+    /* ぱ行 */
+    {0x3071, YK_P_P, YK_P_A, 0}, {0x3074, YK_P_P, YK_P_I, 0}, {0x3077, YK_P_P, YK_P_U, 0},
+    {0x307A, YK_P_P, YK_P_E, 0}, {0x307D, YK_P_P, YK_P_O, 0},
+    /* ま行 */
     {0x307E, YK_P_M, YK_P_A, 0}, {0x307F, YK_P_M, YK_P_I, 0}, {0x3080, YK_P_M, YK_P_U, 0},
     {0x3081, YK_P_M, YK_P_E, 0}, {0x3082, YK_P_M, YK_P_O, 0},
+    /* や行 */
     {0x3084, YK_P_Y, YK_P_A, 0}, {0x3086, YK_P_Y, YK_P_U, 0}, {0x3088, YK_P_Y, YK_P_O, 0},
+    /* ら行 */
     {0x3089, YK_P_R, YK_P_A, 0}, {0x308A, YK_P_R, YK_P_I, 0}, {0x308B, YK_P_R, YK_P_U, 0},
     {0x308C, YK_P_R, YK_P_E, 0}, {0x308D, YK_P_R, YK_P_O, 0},
-    {0x308F, YK_P_W, YK_P_A, 0}, {0x3092, YK_P_W, YK_P_O, 0},
-    {0x3093, YK_P_N, YK_P_N, 0},                        /* ん */
-    {0x3063, YK_P_CL, YK_P_CL, 0},                      /* っ */
+    /* わ行 */
+    {0x308F, YK_P_W, YK_P_A, 0}, {0x3090, YK_P_W, YK_P_I, 0}, {0x3091, YK_P_W, YK_P_E, 0},
+    {0x3092, YK_P_W, YK_P_O, 0}, {0x3094, YK_P_W, YK_P_U, 0},
+    /* ん・っ */
+    {0x3093, YK_P_N, YK_P_N, 0},
+    {0x3063, YK_P_CL, YK_P_CL, 0},
+    /* 小書き母音・拗音 (単独で来た場合) */
     {0x3041, NN, YK_P_A, 1}, {0x3043, NN, YK_P_I, 1}, {0x3045, NN, YK_P_U, 1},
     {0x3047, NN, YK_P_E, 1}, {0x3049, NN, YK_P_O, 1},
     {0x3083, YK_P_Y, YK_P_A, 1}, {0x3085, YK_P_Y, YK_P_U, 1}, {0x3087, YK_P_Y, YK_P_O, 1},
     {0x308E, YK_P_W, YK_P_A, 1},
-    /* ゔ行などは簡略化 */
-    {0x3094, YK_P_W, YK_P_U, 0},
-    {0x30FC, 0xFE, 0, 0},   /* 長音記号: 直前の母音を伸ばす (特別扱い) */
+    /* 長音記号 (特別扱い) */
+    {0x30FC, 0xFE, 0, 0},
 };
 static const int NKANA = (int)(sizeof(KANA) / sizeof(KANA[0]));
 
@@ -113,11 +141,14 @@ int yk_plan_from_kana(const char *kana, const YkPreset *preset, YkPlan *out)
             yk_plan_push(out, YK_P_PAUSE, 320, preset->pitch, 1.0f);
             continue;
         }
-        /* 長音 */
+        /* 長音: 直前の母音を伸ばす (語中なら 0.8 モーラ, 文末なら 1.4 モーラ) */
         if (cp == 0x30FC || cp == 0x301C) {
             if (have_vowel) {
                 const YkPhoneInfo *vi = yk_phone_info(last_vowel);
-                yk_plan_push(out, last_vowel, vi->dur * 0.9f, preset->pitch, 1.0f);
+                float base = vi->dur;
+                int at_emd = (*s == '\0');
+                yk_plan_push(out, last_vowel, base * (at_emd ? 1.5f : 0.85f),
+                             preset->pitch, 1.0f);
                 reading_pos = append_reading_n(out->reading, (int)sizeof(out->reading), reading_pos, "ー", -1);
             }
             continue;
@@ -135,7 +166,14 @@ int yk_plan_from_kana(const char *kana, const YkPreset *preset, YkPlan *out)
         if (k->cp == 0x3093) {             /* ん */
             yk_plan_push(out, YK_P_N, yk_phone_info(YK_P_N)->dur, preset->pitch, 1.0f);
             have_vowel = 0;
+            /* ん の直後の母音・半母音は鼻音から直接つなげる (「んあ」= ンア) */
             continue;
+        }
+        /* 母音が連続する場合 (あ行の語頭以外など) は軽く区切る。
+           「あ行」単独の語頭は息だけで始まるので区切らない。 */
+        if (k->cons == NN && have_vowel) {
+            yk_plan_push(out, YK_P_GLOTTAL, yk_phone_info(YK_P_GLOTTAL)->dur,
+                         preset->pitch, 0.0f);
         }
         /* 子音 */
         if (k->cons != NN) {

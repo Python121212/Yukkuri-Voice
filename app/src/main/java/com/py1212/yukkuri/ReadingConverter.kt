@@ -155,7 +155,7 @@ class ReadingConverter(private val assetDir: File) {
     }
 
     private fun readInteger(num: String): String {
-        val digits = num.trimStart('0')
+        val digits = num.trimStart { it == '0' }
         if (digits.isEmpty()) return "ゼロ"
         if (digits.length > 12) {   // 長すぎる数は 1 桁ずつ
             val sb = StringBuilder()
@@ -183,15 +183,15 @@ class ReadingConverter(private val assetDir: File) {
         return sb.toString()
     }
 
+    /** 1..9999 の読み。例: 1234 -> センニヒャクサンジュウヨン */
     private fun read4(g: String): String {
+        val four = "0000".substring(0, 4 - minOf(4, g.length)) + g.takeLast(4)
         val sb = StringBuilder()
-        val pads = Array(4) { '0' }
-        val s = String(pads) + g
-        val four = s.takeLast(4)
         val names = arrayOf("セン", "ヒャク", "ジュウ", "")
-        for (i in 0 until 4) {
-            val d = four[i] - '0'
-            if (d == 0) continue
+        for (i in 0..3) {
+            val c = four[i]
+            if (c !in '1'..'9') continue
+            val d = c - '0'
             if (!(d == 1 && i > 0)) sb.append(DIGITS[d])
             sb.append(names[i])
         }

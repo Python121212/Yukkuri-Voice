@@ -44,25 +44,38 @@ jobs:
           /tmp/ykcli "ゆっくりしていってね" /tmp/test.wav yukkuri --dump | head -5
           ls -la /tmp/test.wav
 
+      - name: Kotlin compile check (errors as annotations)
+        run: |
+          mkdir -p /tmp/tsrc
+          gcc -std=c99 -O2 -Icore/include core/src/*.c -c -o /tmp/core_test.o || true
+          set +e
+          gradle --no-daemon -p . :app:compileDebugKotlin > /tmp/kotlin.log 2>&1
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            grep -E "^e: " /tmp/kotlin.log | head -40 | while IFS= read -r line; do echo "::error title=kotlin::$(echo "$line" | sed 's|.*/app/src/main/java/com/py1212/yukkuri/||')"; done
+          else
+            echo "::notice title=kotlin::OK"
+          fi
+          exit $rc
+
       - name: Build debug APK
         run: |
           set +e
           gradle --no-daemon -p . :app:assembleDebug --stacktrace > /tmp/build.log 2>&1
           rc=$?
-          tail -60 /tmp/build.log
+          tail -40 /tmp/build.log
           if [ $rc -ne 0 ]; then
-            # ログ API が使えない環境でも原因が分かるように、要点を annotation で出す
-            grep -E "e: file|e: |error:|Unresolved reference|What went wrong|Execution failed" /tmp/build.log \
-              | grep -v "deprecated" | head -30 | while IFS= read -r line; do echo "::error title=gradle::$line"; done
+            grep -E "^e: |FAILURE:|error:|What went wrong|Execution failed|Caused by:" /tmp/build.log \
+              | head -30 | while IFS= read -r line; do echo "::error title=gradle::$(echo "$line" | sed 's|.*/app/src/main/java/com/py1212/yukkuri/||')"; done
           fi
           exit $rc
 
       - name: Collect outputs
         run: |
-          echo "::notice title=APK::$(ls -la app/build/outputs/apk/debug/ 2>/dev/null | tr '\n' ' ')"
           mkdir -p ci-out
           cp app/build/outputs/apk/debug/*.apk ci-out/ 2>/dev/null || true
           cp /tmp/test.wav ci-out/ 2>/dev/null || true
+          ls -la ci-out
 
       - uses: actions/upload-artifact@v4
         if: always()

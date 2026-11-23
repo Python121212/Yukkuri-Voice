@@ -69,7 +69,7 @@ class MainActivity : AppCompatActivity() {
         stopButton.setOnClickListener { stop() }
         saveButton.setOnClickListener { saveWav() }
 
-        presetSpinner.setOnItemSelectedListener = object : AdapterViewListener() {
+        presetSpinner.onItemSelectedListener = object : AdapterViewListener() {
             override fun onSelected(position: Int) { updateInfo() }
         }
         updateInfo()

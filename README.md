@@ -1,1 +1,121 @@
-# Yukkuri-Voice
+# Yukkuri Voice
+
+「ゆっくり」専用の音声合成（TTS）エンジンを、既存エンジンに頼らずスクラッチから作るプロジェクト。
+エンジン本体は **依存ゼロの C99**、Android アプリは **Kotlin + JNI** のネイティブ実装。
+
+- 方式: **フォルマント合成**（ソース・フィルタ型）— 学習データ不要、CPU だけで動く
+- 声: **プリセット方式**（ピッチ / フォルマント / 話速 / 抑揚 / 息 / ビブラート）
+- 入力: **漢字かな交じり文**（8MB の読み辞書を同梱、最長一致でカナ化）
+- 出力: **APK**（GitHub Actions で自動ビルド）
+
+サンプル音声は `docs/audio/` にあります（`demo_yukkuri.wav` など）。
+
+---
+
+## すぐ試す（APK）
+
+GitHub Actions が `main` 以外のこの作業ブランチへの push ごとに APK をビルドし、
+リリース `apk-latest` に上書きアップロードします。
+
+**[app-debug.apk をダウンロード](https://github.com/Python121212/Yukkuri-Voice/releases/download/apk-latest/app-debug.apk)**
+
+1. Android 端末で上記リンクを開く（「提供元不明のアプリ」の許可が必要）
+2. インストールして起動
+3. 文章を入力 →「ゆっくり話す」
+
+> debug 署名なので、Play ストア配布用には release 署名の設定が必要です。
+
+## 構成
+
+```
+core/                 ← 合成エンジン本体（C99・Android 非依存）
+  include/yukkuri.h     公開 API（プリセット / 音素 / 発話プラン / 合成）
+  src/plan.c            かな列 → 音素列 + 韻律（句読点・促音・長音・拗音・声門破裂）
+  src/phones.c          音素テーブル（フォルマント・帯域幅・ノイズ帯域・音量補正）
+  src/presets.c         声のプリセット
+  src/synth.c           フォルマント合成器（共振器カスケード + 放射特性 + 自動音量）
+app/                  ← Android アプリ（Kotlin）
+  src/main/java/com/py1212/yukkuri/
+    MainActivity.kt       UI・再生（AudioTrack）・WAV 保存
+    NativeEngine.kt       JNI ラッパー
+    ReadingConverter.kt   漢字かな交じり文 → カタカナ（二分探索・最長一致・数字読み）
+  src/main/cpp/jni.c      JNI ブリッジ
+scripts/build-dict.mjs 読み辞書の生成（kuromoji の IPADIC から抽出）
+tools/                 開発用 CLI・テスト・音響分析スクリプト
+docs/audio/            サンプル音声
+.github/workflows/     APK ビルド + エンジンテスト + リリース添付
+```
+
+## エンジンのしくみ
+
+1. **読み変換**（Kotlin）
+   漢字かな交じり文を、同梱辞書（約 25 万語）の最長一致でカタカナに変換。
+   数字は桁読み（`1234` → `センニヒャクサンジュウヨン`）、記号・絵文字は読み飛ばし。
+
+2. **発話プラン**（`plan.c`）
+   かな列を音素列に展開し、モーラごとの F0（抑揚）と長さを決める。
+   促音「っ」は次の破裂音の閉鎖を伸ばし、長音「ー」は直前の母音を伸ばす。
+   母音が連続する箇所には軽い声門破裂を入れる。
+
+3. **合成**（`synth.c`）
+   - 声帯パルス（歪ませたノコギリ波 + ジッタ + ビブラート）
+   - 摩擦音・破裂音は帯域ノイズ（`/s/` は 6kHz 付近、`/sh/` は 3kHz 付近）
+   - 5 段の 2 次共振器（フォルマント）をカスケード
+   - 唇の放射特性（+6dB/oct 相当の傾斜）
+   - 短時間 RMS を基準にした自動音量補正 + ソフトクリップ
+
+フォルマント値は `core/src/internal.h` の母音表と `core/src/phones.c` の音素表で管理しています。
+「もっとゆっくり」「もっと高く」は `presets.c` のプリセットを編集するだけで作れます。
+
+## プリセット
+
+| 名前 | 表示 | F0 | フォルマント倍率 | 話速 |
+|---|---|---|---|---|
+| `yukkuri` | ゆっくり（標準） | 235Hz | 1.09 | 0.80 |
+| `reimu` | れいむ | 252Hz | 1.12 | 0.80 |
+| `marisa` | まりさ | 208Hz | 1.05 | 0.84 |
+| `yukkuri_lo` | ゆっくり（低め） | 190Hz | 1.02 | 0.72 |
+| `yukkuri_hi` | ゆっくり（高め） | 285Hz | 1.16 | 0.88 |
+| `slow` | ゆっくり（超低速） | 235Hz | 1.09 | 0.55 |
+
+## 開発
+
+```bash
+# エンジンをホストの gcc でビルドして WAV を作る
+gcc -std=c99 -O2 -Icore/include core/src/*.c tools/cli.c -lm -o ykcli
+./ykcli "ゆっくりしていってね。今日はいい天気ですね。" out.wav yukkuri --dump
+
+# エンジンのテスト
+gcc -std=c99 -O2 -Icore/include core/src/*.c tools/test_engine.c -lm -o test_engine
+./test_engine
+
+# 読み辞書の再生成（kuromoji が必要）
+npm install && npm run dict
+
+# APK は CI でビルド（ローカルに Android SDK があれば）
+gradle :app:assembleDebug
+```
+
+分析用スクリプト（要 numpy）:
+`tools/formant.py`（LPC でフォルマント推定）、`tools/spectrum.py`（1/3 オクターブ表示）。
+
+## 現状とこれから
+
+できていること:
+
+- フォルマント合成エンジン（母音・子音・促音・長音・拗音・アクセント）
+- 漢字かな交じり文の読み変換（数字・記号対応）
+- Android ネイティブアプリ（合成・再生・WAV 保存）
+- CI での自動テストと APK ビルド／リリース
+
+これから:
+
+- アクセント辞書（現在は 2 モーラ周期の擬似アクセント）
+- 音素表のチューニング（子音の自然さ、男性声プリセット）
+- 読み変換の精度向上（未知語の推定、文脈による読み分け）
+- release 署名とストア配布、声のパラメータを UI から調整できるようにする
+
+## ライセンス
+
+- コード: MIT
+- 読み辞書: kuromoji 同梱の IPADIC（NAIST ライセンス）から抽出

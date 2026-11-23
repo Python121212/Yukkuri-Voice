@@ -92,7 +92,9 @@ jobs:
 
       # Releases に APK を添付すると、API 経由で取得できる (sandbox からでも取り出せる)
       - name: Publish to release
-        if: github.ref_type == 'tag' || github.ref == 'refs/heads/arena/db7172c6-yukkuri-voice'
+        # main にマージされたビルドだけを配布用リリースにする
+        # (作業ブランチのビルドは artifact のみ)
+        if: github.ref == 'refs/heads/main' || github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

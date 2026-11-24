@@ -47,7 +47,8 @@ typedef enum {
     YK_P_N,                                        /* 撥音 ん */
     YK_P_CL,                                       /* 促音 (無音) */
     YK_P_B, YK_P_D, YK_P_G, YK_P_P, YK_P_T, YK_P_K,/* 破裂音 */
-    YK_P_M, YK_P_NG,                               /* 鼻音 */
+    YK_P_M, YK_P_NG,                               /* 鼻音 (んが) */
+    YK_P_NA,                                       /* 歯茎鼻音 /n/ (な行) */
     YK_P_S, YK_P_SH, YK_P_H, YK_P_F,               /* 摩擦音 */
     YK_P_Z, YK_P_J,                                /* 破擦/摩擦 (有声) */
     YK_P_R, YK_P_Y, YK_P_W,                        /* 半母音・流音 */

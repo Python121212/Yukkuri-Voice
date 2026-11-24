@@ -451,6 +451,22 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
 
         /* ---- 目標フレーム ---- */
         frame_for_phone(p, preset, &target);
+        /* 文末の母音は f0 が下がる (この声で 235 -> 205Hz 程度)。
+           F0 が下がると高調波の間隔が狭くなり、/e/ の F1=500Hz では
+           2 次高調波 (410Hz) が F1 の山の中心から外れて、3 次 (615Hz)
+           より弱くなってしまう。実際に文末の「ね」だけ母音が
+           「曖昧で聞き取れない」状態になっていた。
+           最後の母音だけ F1 を少し下げ、低次の倍音が確実に山に乗る
+           ようにする (音色は「やや暗い /e/」程度で、識別には十分)。 */
+        if (p <= YK_P_O && idx + 1 < plan->count) {
+            int only_pause_after = 1;
+            for (int j = idx + 1; j < plan->count; j++)
+                if (plan->items[j].phone != YK_P_PAUSE) { only_pause_after = 0; break; }
+            if (only_pause_after) {
+                float f1max = 3.0f * f0 * 1.05f;
+                if (target.f[0] > f1max) target.f[0] = f1max;
+            }
+        }
         /* 破裂音のノイズは「破裂の瞬間」だけ。音素テーブルの noise を
            そのまま使うと、子音の長さぶん (60-80ms) ずっとノイズが鳴り、
            「ぷしゅ」という息の音になる。破裂音の音は閉鎖 + 短い破裂。 */
@@ -471,7 +487,7 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
                 have = 1;
             }
             if (have) {
-                float k = (p == YK_P_N || p == YK_P_M || p == YK_P_NG || p == YK_P_R) ? 0.85f : 0.6f;
+                float k = (p == YK_P_N || p == YK_P_M || p == YK_P_NG || p == YK_P_NA || p == YK_P_R) ? 0.85f : 0.6f;
                 for (int i = 0; i < 5; i++)
                     target.f[i] = target.f[i] * (1.0f - k) + tmp[i] * k;
             }
@@ -878,7 +894,11 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     if (pos > 0) {
         const long hop = (long)(0.001f * sr) > 0 ? (long)(0.001f * sr) : 1;
         const long nh = pos / hop + 1;
-        const long rel = (long)(0.060f * sr);
+        /* 減衰の長さ。60ms にしていたときは、文末の「ね」のように
+           短い (100ms 程度の) 母音の後半がまるごと削られて、
+           「最後が全く聞こえない」状態になっていた。
+           段差を消すのに必要なのは 15-20ms 程度なので、そこまで縮める。 */
+        const long rel = (long)(0.018f * sr);
         for (long h = 1; h < nh; h++) {
             long b = h * hop;
             if (b >= pos) break;

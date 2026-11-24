@@ -502,6 +502,40 @@ static void test_pause_duration(void)
     check(n2 > n1 + SR / 10, "句点で間が入っていない (%d -> %d)", n1, n2);
 }
 
+
+/* 文末の母音が「聞き取れる」こと。
+   60ms のコサイン減衰が文末の短い母音の後半を丸ごと削っていたため、
+   「ね」の母音は 100ms のうち後半 60ms が消え、耳には子音だけ =
+   「ゆっくりしていって…（無音）」に聞こえていた。
+   文末の母音は (a) 十分な長さで鳴っている (b) 減衰で削られていない
+   の 2 点を波形から確かめる。 */
+static void test_final_vowel_audible(void)
+{
+    int n = yk_speak_kana("ゆっくりしていってね。", yk_preset(0), buf,
+                          (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+    check(n > 0, "合成失敗 (文末母音)");
+    if (n <= 0) return;
+
+    /* 末尾から句点の無音を飛ばして、最後の有音区間を探す。 */
+    const int hop = SR / 1000;                 /* 1ms */
+    int lastLoud = -1;
+    for (int i = 0; i + hop <= n; i += hop)
+        if (rms_between(buf, i, i + hop) > 0.02) lastLoud = i;
+    check(lastLoud > 0, "文末に有音区間がない");
+    if (lastLoud <= 0) return;
+
+    check(n - lastLoud < SR / 8,
+          "文末の無音が長すぎる (%.0fms)",
+          1000.0 * (double)(n - lastLoud) / SR);
+
+    /* 最後の有音区間のうち、母音の後半が減衰で落ちていないか。
+       終端 40ms 前の RMS が、その 80ms 前と同程度あること。 */
+    double a = rms_between(buf, lastLoud - SR * 80 / 1000, lastLoud - SR * 40 / 1000);
+    double b = rms_between(buf, lastLoud - SR * 40 / 1000, lastLoud - SR * 8 / 1000);
+    check(b > a * 0.6,
+          "文末の母音が減衰で削られている (前半 %.3f → 後半 %.3f)", a, b);
+}
+
 int main(void)
 {
     printf("yukkuri engine %s\n", yk_version());
@@ -514,6 +548,7 @@ int main(void)
     test_no_sideband_noise();
     test_burst_band();
     test_tail_no_click();
+    test_final_vowel_audible();
     test_fricative_brightness();
     test_sh_vs_s();
     test_stop_onset_click();

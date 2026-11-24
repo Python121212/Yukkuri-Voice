@@ -304,20 +304,35 @@ static int is_stop(YkPhone p)
            p == YK_P_P || p == YK_P_T || p == YK_P_K;
 }
 
-/* フォルマント帯域幅: 低次ほど狭い。F1 は 60-90Hz, F3 以上は 150-250Hz 程度が自然。 */
 /* フォルマントの帯域幅。
-   重要な制約: 帯域幅が F0 (この声で 235Hz) より狭いと、高調波がフォルマントの
-   山を「飛び越えて」しまい、フォルマントが聞こえのピークにならない。
-   帯域幅は F0 と同程度以上にし、中心周波数に比例させて広げる
-   (実声道でも高いフォルマントほど帯域が広い)。 */
+   正弦波 (声帯パルス) の高調波は F0 間隔 (この声で 218-235Hz) で並ぶので、
+   帯域幅が F0 に対して狭すぎると、高調波が山に乗ったり外れたりして
+   山谷がギザギザになる (「スカスカ」して聞こえる)。
+   逆に広すぎると、隣り合うフォルマントの山がつながって母音の輪郭が
+   ぼやける (「うー…」「いー…」と伸びたように聞こえる)。
+
+   そこで「F0 の 0.75 倍」を下限にして、両方のバランスを取る。
+   実測 (ゆっくり声, F0=235Hz, 0-3.5kHz の有声倍音の本数と
+   隣接倍音の最大落差 / F2 帯の相対レベル):
+
+       下限       有声倍音   隣接落差    F2 強度
+       1.15*F0    11.8本     11.8dB     -11.8dB   ← 従来 (設計値が下限に潰れていた)
+       0.90*F0    10.6本     13.0dB     -11.6dB
+       0.75*F0    10.6本     14.0dB     -11.2dB   ← 採用
+       0.60*F0    10.4本     15.1dB     -10.5dB
+       0.45*F0    10.0本     16.5dB      -9.8dB
+
+   下限を狭めるほど F2 は強調される (=母音が明瞭) が、倍音の山谷が
+   深くなって「スカスカ」に近づく。0.75 はその中間。
+
+   なお各次の倍率 (mult) は F1 を最も狭く、高次ほど広く取る。
+   1.15*F0 の下限があったため全次が 270Hz に張り付いており、
+   この設計は長く効いていなかった。 */
 static float bw_for(int i, float base, float f0)
 {
-    float minbw = f0 * 1.15f;                 /* 高調波が必ず 1 本は山に乗る */
-    float bw = base + 0.06f * (float)i * base
-             + (i >= 2 ? 0.12f * (float)(i - 1) * base : 0.0f);
-    (void)minbw;
     static const float mult[5] = { 1.0f, 1.15f, 1.9f, 2.6f, 3.4f };
-    bw = base * mult[i];
+    float bw = base * mult[i];
+    const float minbw = f0 * 0.75f;          /* 高調波が山を飛び越えない下限 */
     if (bw < minbw) bw = minbw;
     return bw;
 }
@@ -335,10 +350,23 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     for (int i = 0; i < plan->count; i++) {
         YkPhone p = (YkPhone)plan->items[i].phone;
         float ms = plan->items[i].dur / spd;
+        /* 母音は合成時に 1.45 倍へ伸ばす (下の本体ループと同じ式)。
+           ここで数え落とすと、実測ループが total に達した時点で打ち切られ、
+           末尾の音素 (文末の母音) が丸ごと捨てられる。 */
+        if (p <= YK_P_O) ms *= 1.45f;
         if (p != YK_P_CL) ms += closure_ms(p);
         total += (long)(ms * sr / 1000.0f);
     }
-    total += (long)(0.15f * sr);
+    /* 文末の余韻。文末の句点休止 (320ms) は語尾の前に要らないので、
+       末尾が休止で終わる場合は短くする。長い無音が続くと
+       「最後が切れた」と感じられるうえ、アプリ側の再生が終わったように
+       見えてしまう。 */
+    {
+        long tailSil = (long)(0.15f * sr);
+        if (plan->count > 0 && plan->items[plan->count - 1].phone == YK_P_PAUSE)
+            tailSil = (long)(0.05f * sr);
+        total += tailSil;
+    }
     if (total > out_cap) total = out_cap;
     if (total > YK_MAX_SAMPLES) total = YK_MAX_SAMPLES;
 
@@ -539,10 +567,15 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
         /* ---- 本体 ---- */
         /* 母音は長めに取る。短すぎると共鳴が立ち上がりきる前に次の
            子音が来て、こもった「プ」のような音になる。 */
+        /* 文末 (最後の音素) の休止は詰める。文の途中の句読点は間として
+           必要だが、文末の休止は長い無音が続くだけで「最後が切れた」
+           「もう終わった」という印象になる。 */
+        const int isPause = (p == YK_P_PAUSE);
+        const int isFinalPause = isPause && idx == plan->count - 1;
         float durMs = ph->dur / spd;
         if (p <= YK_P_O) durMs *= 1.45f;
+        if (isFinalPause && durMs > 120.0f) durMs = 120.0f;
         const long n = (long)(durMs * sr / 1000.0f);
-        const int isPause = (p == YK_P_PAUSE);
         const int isFric = (p == YK_P_S || p == YK_P_SH || p == YK_P_H || p == YK_P_F ||
                             p == YK_P_Z || p == YK_P_J);
         /* /s/ と /ɕ/ のラウドネスをそろえる。

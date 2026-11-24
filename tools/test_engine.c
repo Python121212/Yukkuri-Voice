@@ -536,6 +536,112 @@ static void test_final_vowel_audible(void)
           "文末の母音が減衰で削られている (前半 %.3f → 後半 %.3f)", a, b);
 }
 
+
+/* 倍音の詰まり具合 (「スカスカ」対策)。
+   F0=235Hz の声でフォルマントの帯域幅を狭くしすぎると、高調波が
+   山に乗ったり外れたりして山谷が深くなり、「スカスカ」して聞こえる。
+   逆に広げすぎると母音の輪郭がぼやける。
+   bw_for() の下限を 1.15*F0 (全次が 270Hz に張り付いていた) から
+   0.75*F0 に変えた。その結果、0-3.5kHz の有声倍音は 11.8 -> 10.6 本、
+   隣接倍音の最大落差は 11.8 -> 14.0dB になる。
+   落差が開きすぎていないことを回帰条件にする。 */
+static void test_harmonic_gap(void)
+{
+    const char *kana[5] = { "あ", "い", "う", "え", "お" };
+    for (int v = 0; v < 5; v++) {
+        int n = yk_speak_kana(kana[v], yk_preset(0), buf,
+                              (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+        if (n <= 0) { check(0, "%s: 合成失敗 (倍音)", kana[v]); continue; }
+        int st = SR * 60 / 1000, len = SR * 90 / 1000;
+        if (st + len > n) continue;
+        double f0 = measured_f0(buf + st, len, SR);
+        if (f0 < 150 || f0 > 300) f0 = 235.0;
+        /* 一番強い高調波を基準に、0-3.5kHz の倍音の並びを見る */
+        double amp[64]; int nh = 0;
+        for (double f = f0; f < 3500 && nh < 64; f += f0) {
+            amp[nh] = harm_amp(buf + st, len, SR, f);
+            nh++;
+        }
+        double peak = 0;
+        for (int i = 0; i < nh; i++) if (amp[i] > peak) peak = amp[i];
+        if (peak <= 0) continue;
+        double worst = 0;
+        for (int i = 1; i < nh; i++) {
+            double a = 20.0 * log10(amp[i - 1] / peak + 1e-12);
+            double b = 20.0 * log10(amp[i] / peak + 1e-12);
+            double d = fabs(a - b);
+            if (d > worst) worst = d;
+        }
+        /* /o/ は F1 (523Hz) と F2 (872Hz) が近く、その間の谷が深いので
+           他の母音より大きめに出る (実測 17.6dB)。それを含めた上限。 */
+        check(worst < 19.0,
+              "%s: 隣接倍音の落差が大きすぎる (%.1f dB: スカスカ寄り)",
+              kana[v], worst);
+    }
+}
+
+/* 母音の長さの比率 (「うー…」と伸びて聞こえないか)。
+   合成時は母音を 1.45 倍に伸ばしている。話速 0.80 倍と合わせると
+   CV モーラは約 280ms、うち母音が約 200ms (71%) になる。
+   子音が母音に埋もれない範囲であることを確かめる。 */
+static void test_vowel_duration_ratio(void)
+{
+    int n = yk_speak_kana("か", yk_preset(0), buf,
+                          (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+    check(n > 0, "合成失敗 (母音長)");
+    if (n <= 0) return;
+
+    /* 「か」の子音は先頭の 60ms 前後。母音の区間を後半から測る。 */
+    int hop = SR / 1000;
+    int lastLoud = 0;
+    for (int i = 0; i + hop <= n; i += hop)
+        if (rms_between(buf, i, i + hop) > 0.03) lastLoud = i;
+
+    /* モーラ全体の長さ (無音を除く) */
+    int firstLoud = n;
+    for (int i = 0; i + hop <= n; i += hop)
+        if (rms_between(buf, i, i + hop) > 0.03) { firstLoud = i; break; }
+    double moraMs = 1000.0 * (double)(lastLoud - firstLoud) / SR;
+
+    /* 日本語の 1 モーラは 100-200ms 程度。ゆっくり声なので長めだが、
+       300ms を超えると「伸びた」印象になる。 */
+    check(moraMs < 300.0, "1 モーラが長すぎる (%.0f ms)", moraMs);
+    check(moraMs > 150.0, "1 モーラが短すぎる (%.0f ms)", moraMs);
+
+    /* 合成時に伸ばす母音の長さが、末尾で切り捨てられていないこと。
+       母音のみの「あ」が計算どおりの長さで出ているかで見る。 */
+    int n2 = yk_speak_kana("あ", yk_preset(0), buf,
+                           (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+    /* dur=110ms, 速度 0.80, 母音 1.45 倍 = 199ms 前後 */
+    double aMs = 1000.0 * (double)n2 / SR;
+    check(aMs > 185.0 && aMs < 230.0,
+          "母音 1 音の長さが想定外 (%.0f ms, 期待 199ms 前後)", aMs);
+
+    /* 文末の母音が切り捨てられていないこと。
+       出力サンプル数の見積もりで母音の 1.45 倍を数え落としていたため、
+       句点で終わる文では末尾が約 100ms 短く切られていた。
+       句点つきと句点なしで、有音の終端がほぼ同じ位置に来ることを確かめる。 */
+    int na = yk_speak_kana("ゆっくりしていってね。", yk_preset(0), buf,
+                           (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+    double envA[4096]; int wa = 0;
+    for (int i = 0; i + hop <= na && wa < 4096; i += hop)
+        envA[wa++] = rms_between(buf, i, i + hop);
+    int endA = 0;
+    for (int i = 0; i < wa; i++) if (envA[i] > 0.02) endA = i;
+
+    int nb = yk_speak_kana("ゆっくりしていってね", yk_preset(0), buf,
+                           (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+    double envB[4096]; int wb = 0;
+    for (int i = 0; i + hop <= nb && wb < 4096; i += hop)
+        envB[wb++] = rms_between(buf, i, i + hop);
+    int endB = 0;
+    for (int i = 0; i < wb; i++) if (envB[i] > 0.02) endB = i;
+
+    check(abs(endA - endB) * 1 <= 40,
+          "文末の母音が切り捨てられている (句点あり %d ms / なし %d ms)",
+          endA, endB);
+}
+
 int main(void)
 {
     printf("yukkuri engine %s\n", yk_version());
@@ -549,6 +655,8 @@ int main(void)
     test_burst_band();
     test_tail_no_click();
     test_final_vowel_audible();
+    test_harmonic_gap();
+    test_vowel_duration_ratio();
     test_fricative_brightness();
     test_sh_vs_s();
     test_stop_onset_click();

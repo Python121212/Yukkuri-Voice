@@ -60,8 +60,8 @@ static const KanaDef KANA[] = {
     {0x3060, YK_P_D, YK_P_A, 0}, {0x3062, YK_P_J, YK_P_I, 0}, {0x3065, YK_P_Z, YK_P_U, 0},
     {0x3067, YK_P_D, YK_P_E, 0}, {0x3069, YK_P_D, YK_P_O, 0},
     /* な行 */
-    {0x306A, YK_P_NG, YK_P_A, 0}, {0x306B, YK_P_NG, YK_P_I, 0}, {0x306C, YK_P_NG, YK_P_U, 0},
-    {0x306D, YK_P_NG, YK_P_E, 0}, {0x306E, YK_P_NG, YK_P_O, 0},
+    {0x306A, YK_P_NA, YK_P_A, 0}, {0x306B, YK_P_NA, YK_P_I, 0}, {0x306C, YK_P_NA, YK_P_U, 0},
+    {0x306D, YK_P_NA, YK_P_E, 0}, {0x306E, YK_P_NA, YK_P_O, 0},
     /* は行 */
     {0x306F, YK_P_H, YK_P_A, 0}, {0x3072, YK_P_H, YK_P_I, 0}, {0x3075, YK_P_F, YK_P_U, 0},
     {0x3078, YK_P_H, YK_P_E, 0}, {0x307B, YK_P_H, YK_P_O, 0},

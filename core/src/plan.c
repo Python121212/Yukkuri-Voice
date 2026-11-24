@@ -213,45 +213,19 @@ int yk_plan_from_kana(const char *kana, const YkPreset *preset, YkPlan *out)
        「きって」の き の母音を無声化、語中の ら行を弾き音に)。 */
     yk_apply_allophones(out);
 
-    /* --- 韻律: モーラごとのピッチを決める -----------------------------
-       ゆっくり声は「ほぼ平坦＋文末で軽く下がる」のが特徴。
-       ここでは 2 モーラのアクセント単位を擬似的に作り、
-       文末 2 モーラを下降させる。 */
-    float base = preset->pitch;
-    int momo = 0;
-    int total = out->count;
-    int last_pause = -1;
-    for (int i = 0; i < total; i++)
-        if (out->items[i].phone == YK_P_PAUSE) last_pause = i;
+    /* --- 韻律: アクセント句とモーラごとの F0 ------------------------
+       以前ここに「2 モーラ周期の擬似アクセント」があった。音の高さを
+       モーラ番号の偶奇で決めるだけのものだったので、同じ音素列で
+       意味が違う語 (はし / 箸 / 橋) が区別できず、平板な抑揚が
+       「機械っぽさ」の一因になっていた。
+       いまは記号列入力と同じ yk_apply_accent() を使い、
+       「アクセント句 + アクセント核」という日本語の韻律構造で F0 を決める。
+       記号列で「'」が指定されていればそれを尊重し、無ければ句の長さから
+       平板/中高を推定する。 */
+    yk_apply_accent(out);
 
-    for (int i = 0; i < total; i++) {
-        YkPhoneme *p = &out->items[i];
-        if (p->phone == YK_P_PAUSE) { momo = 0; continue; }
-        if (p->phone == YK_P_CL) continue;
-        int is_vowel = p->phone <= YK_P_O || p->phone == YK_P_Y ||
-                       p->phone == YK_P_W || p->phone == YK_P_R;
-        if (!is_vowel) { p->amp = 0.7f; continue; }
-        /* 呼気の山 (アクセント核)。
-           2 モーラ周期の擬似アクセントだが、差が小さいと平板に聞こえて
-           ロボットになる。高低を広げ、語頭をやや高く、後ろへ向けて
-           ゆるく下げる (自然な下降)。 */
-        float acc = (momo % 2 == 0) ? 1.0f : 0.78f;
-        if (momo == 0) acc = 1.0f;            /* 語頭は高く */
-        if (momo == 1) acc = 0.72f;           /* 2 モーラ目で落として山を作る */
-        /* 全体をゆるく下げる + 文末で下げ */
-        float decl = 1.0f - 0.10f * ((float)i / (float)total);
-        float tail = 1.0f;
-        if (last_pause < 0) last_pause = total;
-        int remain = 0;
-        for (int j = i + 1; j < total; j++)
-            if (out->items[j].phone == YK_P_PAUSE) break; else remain++;
-        if (remain <= 1) tail = 0.80f;
-        else if (remain <= 3) tail = 0.88f;
-        else if (remain <= 6) tail = 0.95f;
-        float semis = -2.9f * (1.0f - acc) - 2.4f * (1.0f - decl) - 5.5f * (1.0f - tail);
-        p->f0 = base * (float)(1.0 + preset->intonation * semis / 12.0);
-        p->amp = 1.0f;
-        momo++;
-    }
+    /* 音量は音素テーブルの値を尊重する (子音 0.70 / 母音 1.00)。
+       以前はここで全て 1.0 に上書きしていたため、子音の音量差が
+       消えていた。 */
     return 0;
 }

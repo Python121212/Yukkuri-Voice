@@ -435,6 +435,30 @@ static void test_sh_vs_s(void)
     check(contrast[1] < 3.0, "す: 5-6kHz が弱すぎる (3-4k との差 %+.1f dB)", contrast[1]);
 }
 
+/* 破裂音・促音・声門破裂の直後にクリックが出ないこと。
+   閉鎖中に声帯フェーズを進めていなかったため、閉鎖明けの 1 サンプル目で
+   パルスの位相が飛び、「プツ」「プッ」というクリックになっていた。 */
+static void test_stop_onset_click(void)
+{
+    const char *txt[3] = { "ゆっくりしていってね。", "た", "きって" };
+    for (int t = 0; t < 3; t++) {
+        int n = yk_speak_kana(txt[t], yk_preset(0), buf, (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+        check(n > 0, "合成失敗: %s", txt[t]);
+        if (n <= 0) continue;
+        double worst = 0.0; int where = 0;
+        for (int i = 1; i < n; i++) {
+            int a = i - SR / 500, b = i + SR / 500;
+            if (a < 0) a = 0;
+            if (b > n) b = n;
+            double r = rms_between(buf, a, b);
+            double d = fabs((double)buf[i] - (double)buf[i - 1]);
+            if (r > 1e-5 && d > 0.01 && d / r > worst) { worst = d / r; where = i; }
+        }
+        check(worst < 6.0, "%s: 破裂の頭に段差がある (相対 %.1f @ %d ms)", txt[t], worst,
+              (int)(where * 1000 / SR));
+    }
+}
+
 static void test_pause_duration(void)
 {
     /* 句読点で間が入り、全体が長くなる */
@@ -457,6 +481,7 @@ int main(void)
     test_tail_no_click();
     test_fricative_brightness();
     test_sh_vs_s();
+    test_stop_onset_click();
     test_pause_duration();
     if (failures) {
         printf("\n%d 件のテストが失敗しました\n", failures);

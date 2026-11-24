@@ -414,6 +414,10 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     float clickEnv = 0.0f;
     float clickAtk = 0.0f;                 /* 破裂の立ち上がり包絡 */
     const float clickAtkStep = 1.0f / (0.0008f * sr);
+    float burstAtk = 0.0f;                 /* バーストそのものの立ち上がり */
+    const float burstAtkStep = 1.0f / (0.0030f * sr);
+    float lowFade = 1.0f;                  /* バーストの低域の遅れ */
+    const float lowFadeStep = 1.0f / (0.0030f * sr);
     float burst = 0.0f;
     float burstHp = 0.0f;
     float hFriction = 0.0f;    /* 摩擦音の「息の強さ」を別経路でも反映 */
@@ -470,6 +474,10 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             float yy = 0.0f;
             for (int i = 0; i < 8; i++) yy = sm_run(&r[i], 0.0f);
             prevRad = yy;
+            /* 閉鎖中も声帯パルスの位相を進めておく。止めておくと、閉鎖が
+               明けた 1 サンプル目で位相が飛び、脈拍の立ち上がりが
+               「プッ」というクリックになる。 */
+            glottal_step(&glottal, f0, sr);
             /* ノイズ経路の状態も落とす。ここを残すと、閉鎖明けの
                1 サンプル目で radN = noise - 0.9*prevRadN が古い値との
                差で跳ね、「プッ」というクリックになる。 */
@@ -485,13 +493,15 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
         if (is_stop(p)) {
             clickEnv = (p == YK_P_P || p == YK_P_T || p == YK_P_K) ? 1.00f : 0.45f;
             clickAtk = 0.0f;
+            burstAtk = 0.0f;
+            lowFade = 0.0f;
+            burst = 0.0f;
         }
         else if (p == YK_P_Z || p == YK_P_J) clickEnv = 0.10f;
-        /* 有声破裂音 (が/だ/ば) は閉鎖明けに声帯が最大振幅でいきなり入る。
-           その 1 サンプルの段差が「プッ」というクリックになるので、
-           本体の先頭 4ms に立ち上がりを付ける。無声破裂のバーストは
-           clickAtk 側で別に立ち上げているので、ここでは触らない。 */
-        const int voiceAtk = (p == YK_P_B || p == YK_P_D || p == YK_P_G);
+        /* 破裂音はどれも閉鎖明けに声帯が立ち上がる。閉鎖中は声帯フェーズを
+           進めていないので、明けた瞬間にパルスの位相が飛んでクリックになる。
+           4ms の立ち上がりを全破裂音と声門破裂に付ける。 */
+        const int voiceAtk = is_stop(p) || p == YK_P_GLOTTAL;
         const long bodyStart = pos;
 
         /* ---- 本体 ---- */
@@ -503,6 +513,19 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
         const int isPause = (p == YK_P_PAUSE);
         const int isFric = (p == YK_P_S || p == YK_P_SH || p == YK_P_H || p == YK_P_F ||
                             p == YK_P_Z || p == YK_P_J);
+        /* /s/ と /ɕ/ のラウドネスをそろえる。
+           ノイズは帯域共振器のあとに放射特性 (+6dB/oct) が掛かるので、
+           高い中心周波数の /s/ (5kHz) ほど大きく出て、/ɕ/ (3.5kHz) より
+           6dB 以上大きくなってしまう。そのため「す」だけが突出して
+           「シュ」と耳につく。中心周波数に応じて補正し、帯域パワーが
+           等しくなるようにする。 */
+        float fricRel = 1.0f;
+        if (isFric) {
+            float fc = target.noiseF > 800.0f ? target.noiseF : 3000.0f;
+            fricRel = 3000.0f / fc;         /* +6dB/oct ぶんの補正 */
+            if (fricRel > 1.0f) fricRel = 1.0f;
+            fricRel *= 0.95f;
+        }
 
         for (long s = 0; s < n && pos < total; s++, pos++) {
 
@@ -568,15 +591,28 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
                「ふぁ」という息の音になるので、時定数を 6ms にする。
                帯域は高めに寄せて「カ」「タ」らしくする。 */
             if (clickEnv > 0.0001f) {
-                burst += (rnd_next(&rnd) - burst) * 0.90f;
+                /* 一次の平滑化 (0.90) では乱数が数サンプルで最大振幅に飛び、
+                   その段差が「プッ」というクリックになる。/s/ を下げて
+                   相対的に目立つようになったので、もっとゆっくり立ち上げる。 */
+                if (burstAtk < 1.0f) burstAtk += burstAtkStep;
+                if (burstAtk > 1.0f) burstAtk = 1.0f;
+                burst += (rnd_next(&rnd) - burst) * 0.35f;
                 burstHp += (burst - burstHp) * 0.20f;
+                /* バーストの低域 (burstHp 側) は 3ms 遅れて入れる。
+                   いきなり全帯域で鳴らすと最初の 1-2 サンプルが段差になる。 */
+                if (lowFade < 1.0f) lowFade += lowFadeStep;
+                if (lowFade > 1.0f) lowFade = 1.0f;
                 /* 立ち上がり (1.5ms) を付ける。いきなり最大振幅の乱数から
                    始めると、その 1 サンプルの段差が「プッ」というクリックに
                    なる。実際の破裂も 1-2ms かけて立ち上がる。 */
                 if (clickAtk < 1.0f) clickAtk += clickAtkStep;
                 if (clickAtk > 1.0f) clickAtk = 1.0f;
                 /* バーストは 1-4kHz に絞る (高域まで通すと「プシュ」) */
-                noise += biquad_lp_run(&burstLp, burst - burstHp) * clickEnv * clickAtk;
+                /* 高域から先に立ち上げる。全帯域を同時に立ち上げると、
+                   バーストの最初の数サンプルが「カチッ」というクリックに
+                   なってしまうので、低域は 3ms かけて後から入れる。 */
+                float envB = clickEnv * clickAtk * burstAtk;
+                noise += biquad_lp_run(&burstLp, burst - burstHp) * envB * lowFade;
                 clickEnv *= 0.99270f;                        /* τ ≈ 2.5ms */
             }
 
@@ -617,7 +653,7 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             rad = onep_lp(&radLp, rad);
 
             out[pos] = rad * cur.amp * ph->amp * cur.gain;
-            if (noiseBuf) noiseBuf[pos] = radN * cur.amp;
+            if (noiseBuf) noiseBuf[pos] = radN * cur.amp * fricRel;
             if (voicedHist) voicedHist[pos] = cur.voiced;
         }
 
@@ -680,8 +716,12 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     }
 
     /* ---- 摩擦音のミックス ----
-       摩擦音の最も強い 20ms 窓が、有声部の最強窓より 8dB 下になるように
-       そろえる。子音ごとのノイズ量のばらつきをここで吸収する。 */
+       摩擦音の最も強い 20ms 窓が、有声部の最強窓より一定量下になるように
+       そろえる。子音ごとのノイズ量のばらつきをここで吸収する。
+
+       ここを -4dB にしていたときは /s/ が母音とほぼ同じ音量になり、
+       母音に入る瞬間にノイズが止まって「シュ」と切れて聞こえた。
+       実際の破裂音・摩擦音は母音より 10-20dB 小さいので -12dB にする。 */
     if (noiseBuf) {
         const long win = (long)(0.020f * sr);
         double peakV = 0.0, peakN = 0.0;
@@ -695,21 +735,40 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             if (an > peakN) peakN = an;
         }
         if (peakN > 1e-12 && peakV > 1e-12) {
-            float g = (float)(sqrt(peakV / peakN) * 0.62);   /* -4dB */
+            float g = (float)(sqrt(peakV / peakN) * 0.25);   /* -12dB */
             for (long i = 0; i < pos; i++) out[i] += noiseBuf[i] * g;
         }
         free(noiseBuf);
         noiseBuf = NULL;
     }
 
-    /* ---- DC 除去 ---- */
+    /* ---- DC 除去 ----
+       ローパス型の DC 除去は極が 0.9998 なので、無音に入っても直前の値が
+       数百サンプルかけて 0 へ戻る。その戻りが破裂の頭で切り替わって
+       「プッ」というクリックになる。
+       無音 (1ms RMS < 1.5e-3) ではフィルタを通さず、そのまま 0 を書いて
+       状態もリセットする。 */
     {
         float dcX = 0.0f, dcY = 0.0f;
-        for (long i = 0; i < pos; i++) {
-            float x = out[i];
-            float y = x - dcX + 0.9998f * dcY;
-            dcX = x; dcY = y;
-            out[i] = y;
+        const long hopD = (long)(0.001f * sr) > 0 ? (long)(0.001f * sr) : 1;
+        for (long i = 0; i < pos; ) {
+            long n2 = hopD;
+            if (i + n2 > pos) n2 = pos - i;
+            double e = 0.0;
+            for (long j = 0; j < n2; j++) e += (double)out[i + j] * out[i + j];
+            if (sqrt(e / (double)n2) < 0.0015) {
+                for (long j = 0; j < n2; j++) out[i + j] = 0.0f;
+                dcX = 0.0f; dcY = 0.0f;
+                i += n2;
+                continue;
+            }
+            for (long j = 0; j < n2; j++) {
+                float x = out[i + j];
+                float y = x - dcX + 0.9998f * dcY;
+                dcX = x; dcY = y;
+                out[i + j] = y;
+            }
+            i += n2;
         }
     }
 

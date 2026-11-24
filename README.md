@@ -9,6 +9,7 @@
 - 出力: **APK**（GitHub Actions で自動ビルド）
 
 サンプル音声は `docs/audio/` にあります（`demo_yukkuri.wav` など）。
+作り直すときは `sh scripts/gen-audio.sh`（読み上げ内容はこのスクリプトの表が唯一の定義）。
 
 ---
 

@@ -246,7 +246,7 @@ typedef struct {
     float gain;
 } Frame;
 
-static void frame_for_phone(YkPhone p, const YkPreset *ps, Frame *fr)
+static void frame_for_phone(YkPhone p, int base, const YkPreset *ps, Frame *fr)
 {
     const YkPhoneInfo *pi = yk_phone_info(p);
     memset(fr, 0, sizeof(*fr));
@@ -260,6 +260,10 @@ static void frame_for_phone(YkPhone p, const YkPreset *ps, Frame *fr)
 
     if (p <= YK_P_O) {
         for (int i = 0; i < 5; i++) fr->f[i] = YK_VOWEL_F[p][i] * ps->formantScale;
+    } else if (p == YK_P_DEV && base >= 0 && base <= YK_P_O) {
+        /* 無声化した母音は、元の母音のフォルマントで息だけを通す。
+           フォルマントを別に持たないので、ここで元の母音から引く。 */
+        for (int i = 0; i < 5; i++) fr->f[i] = YK_VOWEL_F[base][i] * ps->formantScale;
     } else if (pi->formant[0] > 0) {
         for (int i = 0; i < 5; i++) fr->f[i] = (float)pi->formant[i] * ps->formantScale;
     } else {
@@ -416,7 +420,7 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     float vib = 0.0f;
 
     Frame cur, target;
-    frame_for_phone(YK_P_O, preset, &cur);
+    frame_for_phone(YK_P_O, -1, preset, &cur);
     for (int i = 0; i < 5; i++) cur.f[i] = YK_VOWEL_F[YK_P_O][i] * preset->formantScale;
     for (int i = 0; i < 3; i++) cur.f[5 + i] = YK_HF_F[i];
     memset(&target, 0, sizeof(target));
@@ -488,7 +492,7 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
         }
 
         /* ---- 目標フレーム ---- */
-        frame_for_phone(p, preset, &target);
+        frame_for_phone(p, ph->base, preset, &target);
         /* 調音のゆらぎ。
            人間は同じ母音でも毎回まったく同じフォルマントでは発音しない。
            ここでは音素ごとにフォルマントを ±2.5%、帯域幅を ±10% だけ
@@ -1045,6 +1049,22 @@ int yk_speak_kana(const char *kana, const YkPreset *preset, float *out, int out_
 {
     static YkPlan plan;   /* 大きいので静的領域 (単一スレッド前提) */
     int rc = yk_plan_from_kana(kana, preset, &plan);
+    if (reading && reading_cap > 0) {
+        int n = (int)strlen(plan.reading);
+        if (n >= reading_cap) n = reading_cap - 1;
+        if (n < 0) n = 0;
+        memcpy(reading, plan.reading, (size_t)n);
+        reading[n] = '\0';
+    }
+    if (rc != 0) return rc;
+    return yk_synthesize(&plan, preset, out, out_cap);
+}
+
+int yk_speak_symbols(const char *text, const YkPreset *preset, float *out, int out_cap,
+                     char *reading, int reading_cap)
+{
+    static YkPlan plan;   /* 大きいので静的領域 (単一スレッド前提) */
+    int rc = yk_plan_from_symbols(text, preset, &plan);
     if (reading && reading_cap > 0) {
         int n = (int)strlen(plan.reading);
         if (n >= reading_cap) n = reading_cap - 1;

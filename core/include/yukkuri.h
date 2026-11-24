@@ -53,6 +53,12 @@ typedef enum {
     YK_P_Z, YK_P_J,                                /* 破擦/摩擦 (有声) */
     YK_P_R, YK_P_Y, YK_P_W,                        /* 半母音・流音 */
     YK_P_GLOTTAL,                                  /* 母音の前の軽い声門破裂 (あ 行・母音連続) */
+    /* 以下は音素記号列 (ローマ字/かな/ISO 風) から直接指定したときに使う異音。
+       かな入力の自動変換でも選ばれる (日本語の実際の発音に寄せるため)。 */
+    YK_P_TS,     /* /ts/  つ の破擦音 (t + s) */
+    YK_P_CH,     /* /tʃ/  ち・ちゃ の破擦音 */
+    YK_P_DZ,     /* /dz/  ず・づ の破擦音 */
+    YK_P_DEV,    /* 無声化した母音 (声帯は弱く、息だけ) */
     YK_P_PAUSE,                                    /* 句読点などの休止 */
     YK_P_COUNT
 } YkPhone;
@@ -83,6 +89,9 @@ typedef struct {
     float   f0;       /* その音素の F0 [Hz] */
     float   amp;      /* 0..1 の音量係数 (アクセント) */
     float   glide;    /* 直前のフォルマントからの遷移時間 [ms] (0 なら既定値) */
+    /* 無声化した母音 (YK_P_DEV) のときに、どの母音として発音するか。
+       それ以外では 255 (未使用)。 */
+    uint8_t base;
 } YkPhoneme;
 
 typedef struct {
@@ -95,6 +104,23 @@ typedef struct {
 /* かな列 -> 発話プラン。成功で 0 を返す。 */
 int yk_plan_from_kana(const char *kana, const YkPreset *preset, YkPlan *out);
 
+/* 音素記号列 -> 発話プラン。成功で 0 を返す。
+   ローマ字 (ka, sha, tsu, N, Q, :)、かな、記号を混在で受け付け、
+   日本語の異音規則 (ん の同化、母音の無声化、ら行の弾き音、
+   つ/ち/ず の破擦化) を自動で当てる。
+   例: "yuQkuri shite iQte ne" / "ゆっくりしていってね" / "saNpo" */
+int yk_plan_from_symbols(const char *text, const YkPreset *preset, YkPlan *out);
+
+/* 音素記号の文字列表現 (表示用)。例: YK_P_SH -> "sh" */
+const char *yk_phone_symbol(YkPhone p);
+
+/* 音素記号 -> 音素。未知なら YK_P_COUNT。 */
+YkPhone yk_phone_from_symbol(const char *sym);
+
+/* かな列を音素記号列に変換する (UI の「自動変換」表示用)。
+   書き込んだ文字数を返す。 */
+int yk_kana_to_symbols(const char *kana, char *out, int out_cap);
+
 /* ------------------------------------------------------------------ *
  * 合成
  * ------------------------------------------------------------------ */
@@ -105,6 +131,10 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
 /* 簡易 API: かな列 -> サンプル列 */
 int yk_speak_kana(const char *kana, const YkPreset *preset,
                   float *out, int out_cap, char *reading, int reading_cap);
+
+/* 簡易 API: 音素記号列 -> サンプル列 */
+int yk_speak_symbols(const char *text, const YkPreset *preset,
+                     float *out, int out_cap, char *reading, int reading_cap);
 
 const char *yk_version(void);
 

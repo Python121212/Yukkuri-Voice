@@ -642,6 +642,101 @@ static void test_vowel_duration_ratio(void)
           endA, endB);
 }
 
+
+/* 音素記号列の解釈。
+   ローマ字・かな・記号を混在で受け付け、正しい音素列になること。 */
+static void test_symbol_parse(void)
+{
+    static YkPlan pl;
+    /* 「ゆっくり」-> y u Q k u r i (7 音素、Q は促音) */
+    int rc = yk_plan_from_symbols("yuQkuri", yk_preset(0), &pl);
+    check(rc == 0, "記号列の解釈に失敗 (yuQkuri)");
+    if (rc == 0) {
+        check(pl.count == 7, "yuQkuri の音素数が %d (期待 7)", pl.count);
+        check(yk_phone_symbol((YkPhone)pl.items[2].phone)[0] == 'Q',
+              "3 番目が促音でない (%s)", yk_phone_symbol((YkPhone)pl.items[2].phone));
+        check(pl.items[0].phone == YK_P_Y && pl.items[1].phone == YK_P_U,
+              "ゆ が y+u になっていない");
+    }
+
+    /* 撥音 N と長音 : */
+    rc = yk_plan_from_symbols("aN", yk_preset(0), &pl);
+    check(rc == 0 && pl.count == 2 && pl.items[1].phone == YK_P_N,
+          "撥音 N が解釈されない");
+
+    /* かなとローマ字の混在 */
+    rc = yk_plan_from_symbols("ゆQkuri", yk_preset(0), &pl);
+    check(rc == 0 && pl.count >= 6, "かなとローマ字の混在に失敗");
+
+    /* 拗音は 1 モーラ (子音 + 母音の 2 音素) */
+    rc = yk_plan_from_symbols("kya", yk_preset(0), &pl);
+    check(rc == 0 && pl.count == 2,
+          "拗音 kya が %d 音素 (期待 2: 子音 + 母音)", pl.count);
+
+    /* 未知の文字は無視して残りを読む */
+    rc = yk_plan_from_symbols("ka@ku", yk_preset(0), &pl);
+    check(rc == 0 && pl.count == 4, "未知文字の読み飛ばしに失敗 (%d 音素)", pl.count);
+}
+
+/* 日本語の異音規則。 */
+static void test_allophones(void)
+{
+    static YkPlan pl;
+
+    /* ん の同化: さんぽ の ん は [m]、まんが の ん は [ŋ] */
+    yk_plan_from_kana("さんぽ", yk_preset(0), &pl);
+    int found_m = 0;
+    for (int i = 0; i < pl.count; i++)
+        if (pl.items[i].phone == YK_P_M) found_m = 1;
+    check(found_m, "さんぽ の ん が [m] に同化していない");
+
+    yk_plan_from_kana("まんが", yk_preset(0), &pl);
+    int found_ng = 0;
+    for (int i = 0; i < pl.count; i++)
+        if (pl.items[i].phone == YK_P_NG) found_ng = 1;
+    check(found_ng, "まんが の ん が [ŋ] に同化していない");
+
+    /* 母音の無声化: きって の き の母音が無声化する */
+    yk_plan_from_kana("きって", yk_preset(0), &pl);
+    int dev = 0;
+    for (int i = 0; i < pl.count; i++)
+        if (pl.items[i].phone == YK_P_DEV) dev = 1;
+    check(dev, "きって の き が無声化していない");
+
+    /* 単独の「す」「し」は無声化しない (母音が残る) */
+    yk_plan_from_kana("す", yk_preset(0), &pl);
+    dev = 0;
+    for (int i = 0; i < pl.count; i++)
+        if (pl.items[i].phone == YK_P_DEV) dev = 1;
+    check(!dev, "単独の す が無声化している (母音が消える)");
+
+    /* ら行の弾き音: 語中の ら は語頭より短い */
+    static YkPlan p1, p2;
+    yk_plan_from_kana("ら", yk_preset(0), &p1);
+    yk_plan_from_kana("あら", yk_preset(0), &p2);
+    float head = 0, mid = 0;
+    for (int i = 0; i < p1.count; i++) if (p1.items[i].phone == YK_P_R) head = p1.items[i].dur;
+    for (int i = 0; i < p2.count; i++) if (p2.items[i].phone == YK_P_R) mid = p2.items[i].dur;
+    check(head > 0 && mid > 0 && mid < head * 0.8f,
+          "語中の ら が弾き音になっていない (語頭 %.1fms / 語中 %.1fms)", head, mid);
+}
+
+/* かな -> 音素記号の自動変換 (UI 表示用) */
+static void test_kana_to_symbols(void)
+{
+    char buf[256];
+    int n = yk_kana_to_symbols("ゆっくり", buf, (int)sizeof(buf));
+    check(n > 0, "かな -> 記号の変換に失敗");
+    if (n > 0) {
+        check(strstr(buf, "Q") != NULL, "促音が記号に反映されていない (%s)", buf);
+        check(strstr(buf, "k") != NULL, "か行の子音が記号に反映されていない (%s)", buf);
+    }
+    /* 記号に戻したものを再度読める (往復) */
+    static YkPlan pl;
+    int rc = yk_plan_from_symbols(buf, yk_preset(0), &pl);
+    check(rc == 0, "変換した記号列を読み直せない (%s)", buf);
+}
+
 int main(void)
 {
     printf("yukkuri engine %s\n", yk_version());
@@ -657,6 +752,9 @@ int main(void)
     test_final_vowel_audible();
     test_harmonic_gap();
     test_vowel_duration_ratio();
+    test_symbol_parse();
+    test_allophones();
+    test_kana_to_symbols();
     test_fricative_brightness();
     test_sh_vs_s();
     test_stop_onset_click();

@@ -98,6 +98,7 @@ class MainActivity : AppCompatActivity() {
         speakButton.text = "合成中…"
 
         Thread {
+            /* かな (カタカナ) にしたものを合成にも自動変換の表示にも使う */
             val kana = converter.toKatakana(text)
             val presetIndex = presetSpinner.selectedItemPosition.coerceAtLeast(0)
             val readingOut = arrayOf("")
@@ -112,8 +113,12 @@ class MainActivity : AppCompatActivity() {
                     return@runOnUiThread
                 }
                 lastSamples = samples
+                /* かな入力を、実際に発音した音素記号列に自動変換して見せる。
+                   「ん」の同化・母音の無声化などが目で確認できる。 */
+                val symbols = try { NativeEngine.kanaToSymbols(kana) } catch (e: Throwable) { "" }
                 readingText.visibility = View.VISIBLE
-                readingText.text = getString(R.string.label_reading) + "：" + lastReading
+                readingText.text = getString(R.string.label_reading) + "：" + lastReading +
+                    if (symbols.isNotEmpty()) "\n" + symbols else ""
                 readingText.alpha = 0.55f
                 play(samples)
             }

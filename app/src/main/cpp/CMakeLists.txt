@@ -13,6 +13,7 @@ if(NOT EXISTS "${CORE_DIR}/src/synth.c")
 endif()
 
 add_library(yukkuri SHARED
+    ${CORE_DIR}/src/symbols.c
     ${CORE_DIR}/src/plan.c
     ${CORE_DIR}/src/phones.c
     ${CORE_DIR}/src/presets.c

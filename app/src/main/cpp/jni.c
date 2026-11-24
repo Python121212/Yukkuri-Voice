@@ -7,7 +7,7 @@
 #define YK_MAX_SAMPLES (YK_SR * 30)   /* 最大 30 秒 */
 
 static jfloatArray synth(JNIEnv *env, jstring jkana, jstring jpreset,
-                         jint presetIndex, jobjectArray jreadingOut)
+                         jint presetIndex, jobjectArray jreadingOut, jint useSymbols)
 {
     YkPreset ps;
     if (presetIndex >= 0) {
@@ -29,7 +29,9 @@ static jfloatArray synth(JNIEnv *env, jstring jkana, jstring jpreset,
     if (!buf) { (*env)->ReleaseStringUTFChars(env, jkana, kana); return NULL; }
 
     char reading[1024];
-    int n = yk_speak_kana(kana, &ps, buf, YK_MAX_SAMPLES, reading, (int)sizeof(reading));
+    int n = useSymbols
+          ? yk_speak_symbols(kana, &ps, buf, YK_MAX_SAMPLES, reading, (int)sizeof(reading))
+          : yk_speak_kana(kana, &ps, buf, YK_MAX_SAMPLES, reading, (int)sizeof(reading));
     (*env)->ReleaseStringUTFChars(env, jkana, kana);
     if (n <= 0) { free(buf); return NULL; }
 
@@ -50,10 +52,41 @@ JNIEXPORT jfloatArray JNICALL
 Java_com_py1212_yukkuri_NativeEngine_nativeSynth(JNIEnv *env, jclass cls,
                                                     jstring kana, jstring preset,
                                                     jint presetIndex,
-                                                    jobjectArray readingOut)
+                                                    jobjectArray readingOut, jint useSymbols)
 {
     (void)cls;
-    return synth(env, kana, preset, presetIndex, readingOut);
+    return synth(env, kana, preset, presetIndex, readingOut, useSymbols);
+}
+
+/* かな列を音素記号列に自動変換する (UI の「自動変換」表示用)。 */
+JNIEXPORT jstring JNICALL
+Java_com_py1212_yukkuri_NativeEngine_nativeKanaToSymbols(JNIEnv *env, jclass cls, jstring jkana)
+{
+    (void)cls;
+    if (!jkana) return NULL;
+    const char *kana = (*env)->GetStringUTFChars(env, jkana, NULL);
+    if (!kana) return NULL;
+    char out[2048];
+    int n = yk_kana_to_symbols(kana, out, (int)sizeof(out));
+    (*env)->ReleaseStringUTFChars(env, jkana, kana);
+    if (n <= 0) out[0] = '\0';
+    return (*env)->NewStringUTF(env, out);
+}
+
+/* 音素記号の一覧 (UI のヘルプ表示用)。 */
+JNIEXPORT jstring JNICALL
+Java_com_py1212_yukkuri_NativeEngine_nativePhoneSymbol(JNIEnv *env, jclass cls, jint i)
+{
+    (void)cls;
+    if (i < 0 || i >= YK_P_COUNT) return NULL;
+    return (*env)->NewStringUTF(env, yk_phone_symbol((YkPhone)i));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_py1212_yukkuri_NativeEngine_nativePhoneCount(JNIEnv *env, jclass cls)
+{
+    (void)env; (void)cls;
+    return YK_P_COUNT;
 }
 
 JNIEXPORT jstring JNICALL

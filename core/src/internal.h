@@ -17,4 +17,11 @@ static const float YK_VOWEL_F[5][5] = {
 
 int yk_plan_push(YkPlan *plan, YkPhone phone, float dur, float f0, float amp);
 
+/* 日本語の異音規則 (ん の同化 / 母音の無声化 / ら行の弾き音 / 語末の弱化) を
+   まとめて当てる。かな入力と記号入力の両方から呼ぶ。 */
+void yk_apply_allophones(YkPlan *plan);
+
+/* UTF-8 デコード (記号列とかな列の両方で使う最小実装) */
+const char *next_char_utf8(const char *s, uint32_t *cp);
+
 #endif

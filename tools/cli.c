@@ -28,32 +28,46 @@ static void write_wav(const char *path, const float *x, int n, int sr)
 int main(int argc, char **argv)
 {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <kana> <out.wav> [preset] [--dump]\n", argv[0]);
+        fprintf(stderr, "usage: %s <text> <out.wav> [preset] [--symbols] [--dump]\n", argv[0]);
         return 2;
     }
     const char *kana = argv[1];
     const char *outp = argv[2];
     const char *pname = argc > 3 ? argv[3] : "yukkuri";
-    int dump = 0;
-    for (int i = 3; i < argc; i++) if (strcmp(argv[i], "--dump") == 0) dump = 1;
+    int dump = 0, symbols = 0;
+    for (int i = 3; i < argc; i++) {
+        if (strcmp(argv[i], "--dump") == 0) dump = 1;
+        if (strcmp(argv[i], "--symbols") == 0 || strcmp(argv[i], "-s") == 0) symbols = 1;
+    }
 
     int pi = yk_preset_index_of(pname);
     if (pi < 0) { fprintf(stderr, "unknown preset %s\n", pname); return 2; }
     const YkPreset *ps = yk_preset(pi);
 
     char reading[1024];
-    int n = yk_speak_kana(kana, ps, buf, (int)(sizeof(buf)/sizeof(buf[0])), reading, sizeof(reading));
+    int n = symbols
+          ? yk_speak_symbols(kana, ps, buf, (int)(sizeof(buf)/sizeof(buf[0])), reading, sizeof(reading))
+          : yk_speak_kana(kana, ps, buf, (int)(sizeof(buf)/sizeof(buf[0])), reading, sizeof(reading));
     if (n <= 0) { fprintf(stderr, "synth failed: %d\n", n); return 1; }
     write_wav(outp, buf, n, YK_SR);
     fprintf(stderr, "preset=%s reading=%s samples=%d (%.2fs)\n",
             ps->name, reading, n, (double)n / YK_SR);
     if (dump) {
         YkPlan plan;
-        yk_plan_from_kana(kana, ps, &plan);
-        for (int i = 0; i < plan.count; i++)
-            printf("%3d %-8s dur=%6.1f f0=%6.1f amp=%.2f\n", i,
-                   yk_phone_info((YkPhone)plan.items[i].phone)->sym,
+        if (symbols) yk_plan_from_symbols(kana, ps, &plan);
+        else         yk_plan_from_kana(kana, ps, &plan);
+        for (int i = 0; i < plan.count; i++) {
+            char sym[16];
+            YkPhone ph = (YkPhone)plan.items[i].phone;
+            if (ph == YK_P_DEV && plan.items[i].base <= YK_P_O)
+                snprintf(sym, sizeof(sym), "%s°", yk_phone_symbol((YkPhone)plan.items[i].base));
+            else
+                snprintf(sym, sizeof(sym), "%s", yk_phone_symbol(ph));
+            printf("%3d %-3s/%-6s dur=%6.1f f0=%6.1f amp=%.2f\n", i,
+                   yk_phone_info(ph)->sym,
+                   sym,
                    plan.items[i].dur, plan.items[i].f0, plan.items[i].amp);
+        }
         /* RMS を 50ms ごとに */
         int win = YK_SR / 20;
         for (int i = 0; i + win <= n; i += win) {

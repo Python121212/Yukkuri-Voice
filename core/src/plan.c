@@ -11,11 +11,12 @@ int yk_plan_push(YkPlan *p, YkPhone ph, float dur, float f0, float amp)
     x->dur = dur;
     x->f0 = f0;
     x->amp = amp;
+    x->base = 255;      /* 未使用 */
     return 0;
 }
 
-/* --- UTF-8 デコード（かな列専用の最小実装） --- */
-static const char *next_char(const char *s, uint32_t *cp)
+/* --- UTF-8 デコード --- */
+const char *next_char_utf8(const char *s, uint32_t *cp)
 {
     const unsigned char *u = (const unsigned char *)s;
     if (u[0] < 0x80) { *cp = u[0]; return s + 1; }
@@ -128,7 +129,7 @@ int yk_plan_from_kana(const char *kana, const YkPreset *preset, YkPlan *out)
     /* モーラ単位で一度集めてから、アクセント/抑扬を割り当てる */
     while (*s) {
         const char *prev = s;
-        s = next_char(s, &cp);
+        s = next_char_utf8(s, &cp);
         if (cp == 0) break;
         if (cp == ' ' || cp == '\t' || cp == '\n') {
             yk_plan_push(out, YK_P_PAUSE, 160, preset->pitch, 1.0f);
@@ -186,7 +187,7 @@ int yk_plan_from_kana(const char *kana, const YkPreset *preset, YkPlan *out)
         const char *peek = s;
         uint32_t cp2;
         if (*peek) {
-            const char *after = next_char(peek, &cp2);
+            const char *after = next_char_utf8(peek, &cp2);
             const KanaDef *k2 = find_kana(cp2);
             if (k2 && k2->smallY && k->cons != NN && k->cons != YK_P_CL) {
                 s = after;
@@ -207,6 +208,10 @@ int yk_plan_from_kana(const char *kana, const YkPreset *preset, YkPlan *out)
     }
 
     if (out->count == 0) return -2;
+
+    /* 日本語の異音規則を当てる (「さんぽ」の ん を [m] に、
+       「きって」の き の母音を無声化、語中の ら行を弾き音に)。 */
+    yk_apply_allophones(out);
 
     /* --- 韻律: モーラごとのピッチを決める -----------------------------
        ゆっくり声は「ほぼ平坦＋文末で軽く下がる」のが特徴。

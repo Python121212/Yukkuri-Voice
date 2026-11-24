@@ -226,18 +226,24 @@ int yk_plan_from_kana(const char *kana, const YkPreset *preset, YkPlan *out)
         int is_vowel = p->phone <= YK_P_O || p->phone == YK_P_Y ||
                        p->phone == YK_P_W || p->phone == YK_P_R;
         if (!is_vowel) { p->amp = 0.7f; continue; }
-        /* 呼気の山 (アクセント核) */
-        float acc = (momo % 2 == 0) ? 1.0f : 0.86f;
+        /* 呼気の山 (アクセント核)。
+           2 モーラ周期の擬似アクセントだが、差が小さいと平板に聞こえて
+           ロボットになる。高低を広げ、語頭をやや高く、後ろへ向けて
+           ゆるく下げる (自然な下降)。 */
+        float acc = (momo % 2 == 0) ? 1.0f : 0.78f;
+        if (momo == 0) acc = 1.0f;            /* 語頭は高く */
+        if (momo == 1) acc = 0.72f;           /* 2 モーラ目で落として山を作る */
         /* 全体をゆるく下げる + 文末で下げ */
-        float decl = 1.0f - 0.06f * ((float)i / (float)total);
+        float decl = 1.0f - 0.10f * ((float)i / (float)total);
         float tail = 1.0f;
         if (last_pause < 0) last_pause = total;
         int remain = 0;
         for (int j = i + 1; j < total; j++)
             if (out->items[j].phone == YK_P_PAUSE) break; else remain++;
-        if (remain <= 1) tail = 0.88f;
-        else if (remain <= 3) tail = 0.94f;
-        float semis = -2.2f * (1.0f - acc) - 1.6f * (1.0f - decl) - 4.0f * (1.0f - tail);
+        if (remain <= 1) tail = 0.80f;
+        else if (remain <= 3) tail = 0.88f;
+        else if (remain <= 6) tail = 0.95f;
+        float semis = -2.9f * (1.0f - acc) - 2.4f * (1.0f - decl) - 5.5f * (1.0f - tail);
         p->f0 = base * (float)(1.0 + preset->intonation * semis / 12.0);
         p->amp = 1.0f;
         momo++;

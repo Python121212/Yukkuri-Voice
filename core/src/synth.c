@@ -406,8 +406,12 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     glottal_init(&glottal);
     float f0 = preset->pitch;
     float jitter = 0.0f;
+    float jitterWander = 0.0f;      /* よりゆっくりした周期のうねり */
+    float shimmer = 0.0f;           /* 周期ごとの振幅ゆらぎ */
     float prevRad = 0.0f;
     long vibPhase = 0;
+    float vibPhaseOff = 0.0f;       /* 母音ごとにビブラートの位相をずらす */
+    float vib = 0.0f;
 
     Frame cur, target;
     frame_for_phone(YK_P_O, preset, &cur);
@@ -426,7 +430,11 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     const float glideF   = 1.0f - expf(-1.0f / (0.020f * sr));   /* フォルマント遷移 20ms */
     /* 振幅の時定数は短く (3ms)。長いと「子音の直後に母音が遅れて
        立ち上がる」ように聞こえて、音節がばらばらに聞こえる。 */
-    const float glideAmp = 1.0f - expf(-1.0f / (0.003f * sr));
+    /* 立ち上がりの時定数。人間は毎回まったく同じ速さで声を出さないので、
+       音素ごとに ±30% ほどばらつかせる (値は下の本体ループで決める)。
+       全部が同じ 3ms で立ち上がると、音節の頭がどれも同じ形になり
+       機械的に聞こえる。 */
+    float glideAmpAtk = 1.0f - expf(-1.0f / (0.003f * sr));
     const float glideF0  = 1.0f - expf(-1.0f / (0.040f * sr));
 
     /* 明るさ補正: 3kHz 以上を何倍に持ち上げるか。
@@ -479,6 +487,17 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
 
         /* ---- 目標フレーム ---- */
         frame_for_phone(p, preset, &target);
+        /* 調音のゆらぎ。
+           人間は同じ母音でも毎回まったく同じフォルマントでは発音しない。
+           ここでは音素ごとにフォルマントを ±2.5%、帯域幅を ±10% だけ
+           ずらす。値は決定論的な乱数から作るので、同じ入力なら同じ結果に
+           なる (再現性は保つ)。
+           全部の音節が数学的に同一の音になると、どうしても機械的に聞こえる。 */
+        if (p != YK_P_PAUSE) {
+            for (int i = 0; i < 5; i++)
+                target.f[i] *= 1.0f + 0.025f * rnd_next(&rnd);
+            target.bw *= 1.0f + 0.10f * rnd_next(&rnd);
+        }
         /* 文末の母音は f0 が下がる (この声で 235 -> 205Hz 程度)。
            F0 が下がると高調波の間隔が狭くなり、/e/ の F1=500Hz では
            2 次高調波 (410Hz) が F1 の山の中心から外れて、3 次 (615Hz)
@@ -525,9 +544,9 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
         long n_clo = (long)(closure_ms(p) * sr / 1000.0f) + closureLeft;
         closureLeft = 0;
         for (long s = 0; s < n_clo && pos < total; s++, pos++) {
-            cur.voiced += (0.0f - cur.voiced) * glideAmp * 4.0f;
-            cur.noise  += (0.0f - cur.noise) * glideAmp * 4.0f;
-            cur.amp    += (1.0f - cur.amp) * glideAmp;
+            cur.voiced += (0.0f - cur.voiced) * glideAmpAtk * 4.0f;
+            cur.noise  += (0.0f - cur.noise) * glideAmpAtk * 4.0f;
+            cur.amp    += (1.0f - cur.amp) * glideAmpAtk;
             /* 共振器を空回しして状態を落とし、放射特性の前回値も更新しておく。
                ここを飛ばすと、閉鎖明けの 1 サンプルだけ放射差分が跳ねて
                「カチッ」というクリックになる。 */
@@ -563,6 +582,16 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
            4ms の立ち上がりを全破裂音と声門破裂に付ける。 */
         const int voiceAtk = is_stop(p) || p == YK_P_GLOTTAL;
         const long bodyStart = pos;
+        /* 母音が変わるたびにビブラートの開始位相をずらす。
+           全部の母音が同じ位相で揺れると、機械的に聞こえる。
+           乱数は決定論的な Xorshift を使うので、同じ入力なら同じ結果になる。 */
+        if (p <= YK_P_O) vibPhaseOff = (float)(rnd_next(&rnd) * 1000.0f);
+        /* 声の立ち上がりの速さも音素ごとに少し変える (±30%)。 */
+        {
+            float r = 1.0f + 0.30f * rnd_next(&rnd);
+            if (r < 0.7f) r = 0.7f;
+            glideAmpAtk = 1.0f - expf(-r / (0.003f * sr));
+        }
 
         /* ---- 本体 ---- */
         /* 母音は長めに取る。短すぎると共鳴が立ち上がりきる前に次の
@@ -600,14 +629,14 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             /* 母音は子音の直後からすぐ声を出す (頼りない立ち上がりを防ぐ)。
                子音自身はノイズで作るので、有声を早く入れても濁らない。 */
             float tV = isPause ? 0.0f : (p <= YK_P_O ? target.voiced : target.voiced);
-            cur.voiced += (tV - cur.voiced) * glideAmp;
-            cur.amp += (target.amp - cur.amp) * glideAmp;
-            cur.gain += (target.gain - cur.gain) * glideAmp;
-            cur.noise += (target.noise - cur.noise) * glideAmp;
+            cur.voiced += (tV - cur.voiced) * glideAmpAtk;
+            cur.amp += (target.amp - cur.amp) * glideAmpAtk;
+            cur.gain += (target.gain - cur.gain) * glideAmpAtk;
+            cur.noise += (target.noise - cur.noise) * glideAmpAtk;
             cur.noiseF += (target.noiseF - cur.noiseF) * glideF;
             cur.noiseBw += (target.noiseBw - cur.noiseBw) * glideF;
 
-            hFriction += ((isFric ? 1.0f : 0.0f) - hFriction) * glideAmp;
+            hFriction += ((isFric ? 1.0f : 0.0f) - hFriction) * glideAmpAtk;
 
             /* 摩擦音など無声子音は、有声の重なりでノイズが打ち消されないよう
                子音区間では声帯を止める (VOT ぶんの遅れは自然)。 */
@@ -623,13 +652,29 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             /* F0 */
             float tf = ph->f0 > 0 ? ph->f0 : preset->pitch;
             f0 += (tf - f0) * glideF0;
+            /* ビブラートは「息が続く母音の後半」だけ、少しずつ深くなる。
+               常時同じ深さで掛けると、1 音ずつ機械的に同じ揺れが乗って
+               ロボットのように聞こえる。実際の歌や朗読でも、ビブラートは
+               母音の後半から自然に立ち上がる。
+               開始位相も母音ごとに少しずらして、揺れの山が揃わないようにする。 */
             vibPhase++;
-            float vib = preset->vibrato * sinf(2.0f * (float)M_PI * 5.2f * (float)vibPhase / sr);
-            /* ジッタは「揺らぎ」なので 20ms 程度のゆっくりした動きにとどめる。
-               ここを速く動かすとフォルマントの狭い山を横切るたびに
-               側帯波が出て、母音に「プシュ」という雑音が混ざる。 */
-            jitter = jitter * 0.9995f + rnd_next(&rnd) * 0.0006f;
-            float fnow = f0 * powf(2.0f, (vib + jitter) / 12.0f);
+            {
+                float t = (n > 1) ? (float)s / (float)n : 0.0f;   /* 音素内の位置 */
+                float vibDepth = t > 0.35f ? (t - 0.35f) / 0.65f : 0.0f;
+                vibDepth *= vibDepth;                              /* 後半で滑らかに */
+                float ph = 2.0f * (float)M_PI * 5.2f * (float)(vibPhase + vibPhaseOff) / sr;
+                vib = preset->vibrato * vibDepth * sinf(ph);
+            }
+            /* ジッタ (周期の揺らぎ)。
+               人間の周期変動は 1-20Hz のゆっくりした成分が主で、1 周期
+               ごとの差はごくわずか。以前は効きが小さすぎて (実効 0.03
+               半音) 事実上ゼロだったので、15ms 程度に平滑化した揺らぎと、
+               さらにゆっくりした (数 Hz) うねりの 2 成分にした。
+               フォルマントの山を横切る速い揺れは側帯波が出るので、
+               平滑化して遅い成分だけにしている。 */
+            jitter = jitter * 0.9965f + rnd_next(&rnd) * 0.010f;
+            jitterWander = jitterWander * 0.99975f + rnd_next(&rnd) * 0.0022f;
+            float fnow = f0 * powf(2.0f, (vib + jitter + jitterWander) / 12.0f);
 
             /* ---- 声帯励振 (Rosenberg パルスの微分) ----
                微分すると -12dB/oct で減衰する自然なスペクトルになる。
@@ -637,7 +682,13 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
                係数を掛ける。 */
             float exc = glottal_step(&glottal, fnow, sr) * 130.0f;
             /* 声帯パルスの高域を軽く丸める (実際の声道の放射前の減衰) */
-            float src = onep_lp(&glottalLp, exc) * cur.voiced;
+            /* シマー (周期ごとの振幅ゆらぎ)。
+               声帯は左右が完全に対称ではないので、1 周期ごとの振幅が
+               わずかに揺れる。ここが「0」だと、母音が一定の音量の
+               オルガンのように聞こえて機械的になる。
+               ゆっくりした係数 (周期の数倍の速さ) で ±6% 揺らす。 */
+            shimmer = shimmer * 0.9990f + rnd_next(&rnd) * 0.0045f;
+            float src = onep_lp(&glottalLp, exc) * cur.voiced * (1.0f + shimmer);
             /* 息成分 (有声時のブレス)。声道を通すので「ハスキーさ」になり、
                生のノイズを足すより自然。 */
             src += rnd_next(&rnd) * preset->breath * 0.010f * cur.voiced;

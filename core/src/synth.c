@@ -294,6 +294,8 @@ static float closure_ms(YkPhone p)
     case YK_P_P: case YK_P_T: case YK_P_K: return 55.0f;
     case YK_P_B: case YK_P_D: case YK_P_G: return 40.0f;
     case YK_P_GLOTTAL: return 20.0f;
+    /* 鼻音: 口の閉鎖ぶん。声帯は鳴り続けるので下の処理で減衰させる。 */
+    case YK_P_M: case YK_P_N: case YK_P_NG: case YK_P_NA: return 45.0f;
     default: return 0.0f;
     }
 }
@@ -440,7 +442,7 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     /* 明るさ補正: 3kHz 以上を何倍に持ち上げるか。
        声道の縦続だけでは 4kHz 以上が -40dB まで落ちて「こもる」ので、
        耳が子音の識別に使う 3-8kHz を補正する。 */
-    const float kShelf = 3.2f;
+    const float kShelf = 1.4f;
 
     for (int j = 0; j < 3; j++) {
         sm_reset(&r[5 + j]);
@@ -541,12 +543,22 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
         }
 
         /* ---- 破裂音の閉鎖 ---- */
+        /* 鼻音 (/m/ /n/ /ŋ/) も声道の一部を完全に閉じる音なので、
+           閉鎖の区間が無いと母音のままのように聞こえる。
+           特に文末の「ま」は、閉鎖が無いと「まあ」と伸ばしたように聞こえていた。
+           閉鎖は声帯が鳴り続けるので、破裂音と違って音量を落とさずに
+           口側の共鳴だけを鼻に切り替える (ここでは閉鎖ぶんを無声化せず、
+           音量を 0.25 倍まで落として「鼻でこもる」区間を作る)。 */
+        int isNasal = (p == YK_P_M || p == YK_P_N || p == YK_P_NG || p == YK_P_NA);
         long n_clo = (long)(closure_ms(p) * sr / 1000.0f) + closureLeft;
         closureLeft = 0;
         for (long s = 0; s < n_clo && pos < total; s++, pos++) {
-            cur.voiced += (0.0f - cur.voiced) * glideAmpAtk * 4.0f;
+            /* 鼻音の閉鎖では声帯を止めない (止めると /m/ ではなく
+               「ッ」になる)。口を閉じたぶん音量を落とすだけにする。 */
+            float vTgt = isNasal ? cur.voiced : 0.0f;
+            cur.voiced += (vTgt - cur.voiced) * glideAmpAtk * 4.0f;
             cur.noise  += (0.0f - cur.noise) * glideAmpAtk * 4.0f;
-            cur.amp    += (1.0f - cur.amp) * glideAmpAtk;
+            cur.amp    += ((isNasal ? 0.30f : 1.0f) - cur.amp) * glideAmpAtk;
             /* 共振器を空回しして状態を落とし、放射特性の前回値も更新しておく。
                ここを飛ばすと、閉鎖明けの 1 サンプルだけ放射差分が跳ねて
                「カチッ」というクリックになる。 */

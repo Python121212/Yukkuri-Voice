@@ -481,9 +481,12 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
 
     float clickEnv = 0.0f;
     float clickAtk = 0.0f;                 /* 破裂の立ち上がり包絡 */
-    const float clickAtkStep = 1.0f / (0.0008f * sr);
+    /* 破裂の立ち上がり。0.8ms は速すぎて、閉鎖のあとの「パッ」が
+       耳につく (小さな「っ」で「プツ」と聞こえる正体)。
+       実際の破裂音の立ち上がりは 2-3ms 程度。 */
+    const float clickAtkStep = 1.0f / (0.0022f * sr);
     float burstAtk = 0.0f;                 /* バーストそのものの立ち上がり */
-    const float burstAtkStep = 1.0f / (0.0030f * sr);
+    const float burstAtkStep = 1.0f / (0.0045f * sr);
     float lowFade = 1.0f;                  /* バーストの低域の遅れ */
     const float lowFadeStep = 1.0f / (0.0030f * sr);
     float burst = 0.0f;
@@ -491,6 +494,8 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     float hFriction = 0.0f;    /* 摩擦音の「息の強さ」を別経路でも反映 */
     long pos = 0;
     long closureLeft = 0;
+    float relCoefRun = 0.999f;      /* 閉鎖中の減衰係数 (閉鎖長に応じて決める) */
+    float breathLp = 0.0f;          /* 閉鎖中に敷く息の床 */
 
     for (int idx = 0; idx < plan->count && pos < total; idx++) {
         const YkPhoneme *ph = &plan->items[idx];
@@ -566,9 +571,21 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
            口側の共鳴だけを鼻に切り替える (ここでは閉鎖ぶんを無声化せず、
            音量を 0.25 倍まで落として「鼻でこもる」区間を作る)。 */
         int isNasal = (p == YK_P_M || p == YK_P_N || p == YK_P_NG || p == YK_P_NA);
-        const float relCoef = expf(-1.0f / (0.008f * sr));   /* 8ms のリリース */
         long n_clo = (long)(closure_ms(p) * sr / 1000.0f) + closureLeft;
         closureLeft = 0;
+        /* 閉鎖中の減衰係数。直前のサンプルを指数減衰させて「矩形の切断」を
+           避けるわけだが、固定の 8ms にしていたため、促音「っ」のように
+           閉鎖が長い (100ms 前後) 場合に 30ms で消えきってしまい、
+           残りの 70ms がデジタル無音になっていた。それが破裂音の前の
+           「プツ」の正体。閉鎖の長さに合わせて、最後まで緩やかに
+           減衰しきる時定数を選ぶ (5τ = n_clo)。 */
+        {
+            float nSec = (float)n_clo / sr;
+            float tau = nSec / 5.0f;
+            if (tau > 0.030f) tau = 0.030f;   /* 長くても 30ms まで */
+            if (tau < 0.004f) tau = 0.004f;
+            relCoefRun = expf(-1.0f / (tau * sr));
+        }
         for (long s = 0; s < n_clo && pos < total; s++, pos++) {
             /* 鼻音の閉鎖では声帯を止めない (止めると /m/ ではなく
                「ッ」になる)。口を閉じたぶん音量を落とすだけにする。 */
@@ -597,8 +614,17 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             /* 閉鎖中も直前の音を指数減衰 (τ = 8ms) で残す。
                完全な 0 を書くと波形が矩形状に切れ、耳には「プツ」という
                クリックとして聞こえる。鼻音は声帯が続くのでゆっくり減衰。 */
-            out[pos] = prevOut;
-            prevOut *= isNasal ? 0.9995f : relCoef;
+            /* 閉鎖中の息の床。直前のサンプルを減衰させるだけだと、
+               無声母音 (き の i°) のあとでは直前がほぼ 0 なので、
+               閉鎖が丸ごとデジタル無音になる (きっと で実測 88ms)。
+               声帯を閉じた瞬間にも口の中の空気は動いているので、
+               ごく小さい息を常に敷いておく。 */
+            {
+                float br = rnd_next(&rnd);
+                breathLp += (br - breathLp) * 0.35f;
+                out[pos] = prevOut + breathLp * 0.010f;
+            }
+            prevOut *= isNasal ? 0.99995f : relCoefRun;
             if (noiseBuf) noiseBuf[pos] = 0.0f;
             if (voicedHist) voicedHist[pos] = 0.0f;
         }
@@ -922,7 +948,10 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             if (ab > peakB) peakB = ab;
         }
         if (peakB > 1e-12 && peakV > 1e-12) {
-            float g = (float)(sqrt(peakV / peakB) * 0.5);    /* -6dB */
+            /* -6dB では母音より破裂が大きくなり (実測 0.44 対 0.36)、
+               「プッ」と弾けて聞こえた。日本語の破裂は母音より
+               15-20dB 小さいので -12dB 程度に落とす。 */
+            float g = (float)(sqrt(peakV / peakB) * 0.25);   /* -12dB */
             for (long i = 0; i < pos; i++) out[i] += burstBuf[i] * g;
         }
         free(burstBuf);

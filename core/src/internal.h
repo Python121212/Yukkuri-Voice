@@ -21,6 +21,11 @@ int yk_plan_push(YkPlan *plan, YkPhone phone, float dur, float f0, float amp);
    まとめて当てる。かな入力と記号入力の両方から呼ぶ。 */
 void yk_apply_allophones(YkPlan *plan);
 
+/* アクセント句を割り当てる (アクセント核の位置を決める)。
+   記号列で「'」が指定された句はそれを尊重し、指定の無い句は
+   語の長さから平板/起伏を推定する。plan.c と symbols.c の両方から呼ぶ。 */
+void yk_apply_accent(YkPlan *plan);
+
 /* UTF-8 デコード (記号列とかな列の両方で使う最小実装) */
 const char *next_char_utf8(const char *s, uint32_t *cp);
 

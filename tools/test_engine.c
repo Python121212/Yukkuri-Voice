@@ -92,6 +92,7 @@ static double formant_peak(const float *x, int n, int sr, double f0,
         aa[nh] = harm_amp(x, n, sr, f);
         nh++;
     }
+    /* 帯域の中で「最も強い局所的な山」を返す。 */
     double best = 0, bestF = 0;
     for (int i = 1; i + 1 < nh; i++) {
         if (aa[i] > aa[i - 1] && aa[i] >= aa[i + 1] && aa[i] > best) {
@@ -99,8 +100,8 @@ static double formant_peak(const float *x, int n, int sr, double f0,
             bestF = fa[i];
         }
     }
+    /* 単調な帯域なら一番強い高調波を返す */
     if (bestF == 0 && nh > 0) {
-        /* 単調な帯域なら一番強い高調波を返す */
         for (int i = 0; i < nh; i++) if (aa[i] > best) { best = aa[i]; bestF = fa[i]; }
     }
     return bestF;
@@ -255,9 +256,15 @@ static void test_vowel_formants(void)
         check(n > 0, "合成失敗: %s", kana[v]);
         if (n <= 0) return;
         /* 母音の定常部を測る。立ち上がり (0-40ms) は F0 付近の成分が
-           強く出るので避け、40ms 以降の 60ms を使う。 */
+           強く出るので避け、40ms 以降を使う。
+           窓長は 60ms では短すぎた: ハンの窓でも F1 (500Hz 付近、最も
+           強い成分) の裾が 700-800Hz まで漏れ、/i/ の F2 (2500Hz) と
+           ほぼ同じ高さの偽の山を作っていた。解析窓を可能な限り長く取る
+           (最大 100ms) ことで、F1 の裾と F2 の山を分離する。 */
         const float *seg = buf + SR * 3 / 100;
-        int len = SR * 6 / 100;
+        int len = SR * 10 / 100;
+        if (len > n - SR * 3 / 100) len = n - SR * 3 / 100;
+        if (len < SR * 6 / 100) len = SR * 6 / 100;
 
         float peakv = 0;
         for (int i = 0; i < n; i++) if (fabsf(buf[i]) > peakv) peakv = fabsf(buf[i]);
@@ -737,6 +744,118 @@ static void test_kana_to_symbols(void)
     check(rc == 0, "変換した記号列を読み直せない (%s)", buf);
 }
 
+
+/* ---- 韻律: アクセント -------------------------------------------------- */
+
+/* 同じ音素列がアクセントの位置で違う音の高さになること。
+   「はし」と「箸はし'」が区別できないのが以前の問題だった。 */
+static void test_accent_pitch(void)
+{
+    const YkPreset *ps = yk_preset(0);
+    YkPlan flat, atama, odaka;
+
+    check(yk_plan_from_symbols("h a sh i", ps, &flat) == 0, "アクセント: 平板の解析に失敗");
+    check(yk_plan_from_symbols("h a' sh i", ps, &atama) == 0, "アクセント: 頭高の解析に失敗");
+    check(yk_plan_from_symbols("h a sh i' g a", ps, &odaka) == 0, "アクセント: 尾高の解析に失敗");
+
+    /* 平板は 1 拍目が低く 2 拍目が高い (上がる) */
+    float f_a_flat = 0, f_i_flat = 0;
+    for (int i = 0; i < flat.count; i++) {
+        if (flat.items[i].phone == YK_P_A) f_a_flat = flat.items[i].f0;
+        if (flat.items[i].phone == YK_P_I) f_i_flat = flat.items[i].f0;
+    }
+    check(f_i_flat > f_a_flat + 5.0f,
+          "平板: 2 拍目が上がっていない (a=%.0f i=%.0f Hz)", f_a_flat, f_i_flat);
+
+    /* 頭高は 1 拍目が高く 2 拍目で下がる (下がる) */
+    float f_a_at = 0, f_i_at = 0;
+    for (int i = 0; i < atama.count; i++) {
+        if (atama.items[i].phone == YK_P_A) f_a_at = atama.items[i].f0;
+        if (atama.items[i].phone == YK_P_I) f_i_at = atama.items[i].f0;
+    }
+    check(f_a_at > f_i_at + 20.0f,
+          "頭高: 2 拍目が下がっていない (a=%.0f i=%.0f Hz)", f_a_at, f_i_at);
+
+    /* 平板と頭高で、同じ母音の高さがはっきり違うこと */
+    check(fabsf(f_a_at - f_a_flat) > 15.0f,
+          "平板と頭高で 1 拍目の高さが同じ (%.0f vs %.0f Hz)", f_a_flat, f_a_at);
+
+    /* 尾高は助詞で下がる (「橋が」の が が低い) */
+    float f_ga = 0, f_i_od = 0;
+    for (int i = 0; i < odaka.count; i++) {
+        if (odaka.items[i].phone == YK_P_G) f_ga = odaka.items[i].f0;
+        if (odaka.items[i].phone == YK_P_I && f_i_od == 0) f_i_od = odaka.items[i].f0;
+    }
+    check(f_i_od > f_ga + 20.0f,
+          "尾高: 助詞が下がっていない (i=%.0f ga=%.0f Hz)", f_i_od, f_ga);
+
+    /* 声質 (= プリセットのピッチ) を動かさないこと。
+       高い段はプリセットのピッチに置き、句末でだけ下げる設計。
+       句全体が沈み込んでいないことを確かめる
+       (以前は句の中で基準を取り直していたため、拍を追うごとに
+        沈んでいき、声全体が低く聞こえていた。実測 平均 241Hz)。
+       平板の 2 拍目は句末なので、わずかに下がった値になる。 */
+    check(f_i_flat > ps->pitch * 0.86 && f_i_flat < ps->pitch * 1.06,
+          "平板の高い段が沈みすぎ/高すぎ (%.0f Hz, プリセット %.0f Hz)",
+          f_i_flat, ps->pitch);
+    /* 低い段が沈みすぎないこと (頭高の低い段と同じ段) */
+    check(f_a_flat > ps->pitch * 0.80f,
+          "低い段が沈みすぎ (%.0f Hz)", f_a_flat);
+}
+
+/* アクセントは音量ではなくピッチで表すこと (子音の音量を壊さない)。 */
+static void test_accent_uses_pitch_not_amp(void)
+{
+    const YkPreset *ps = yk_preset(0);
+    YkPlan pl;
+    check(yk_plan_from_symbols("k a' k i", ps, &pl) == 0, "アクセント(音量): 解析に失敗");
+    for (int i = 0; i < pl.count; i++) {
+        YkPhone p = (YkPhone)pl.items[i].phone;
+        if (p == YK_P_K)
+            check(pl.items[i].amp < 0.9f,
+                  "子音の音量がアクセントで上書きされた (amp=%.2f)", pl.items[i].amp);
+    }
+}
+
+/* 「/」はアクセント句の境界で、声門破裂 (ʔ) や休止を入れないこと。
+   以前は「あ/い」が「あッい」になっていた。 */
+static void test_slash_is_not_glottal(void)
+{
+    const YkPreset *ps = yk_preset(0);
+    YkPlan pl;
+    check(yk_plan_from_symbols("a / i", ps, &pl) == 0, "/ の解析に失敗");
+    for (int i = 0; i < pl.count; i++) {
+        check(pl.items[i].phone != YK_P_GLOTTAL,
+              "/ が声門破裂になっている (index %d)", i);
+        if (pl.items[i].phone == YK_P_PAUSE)
+            check(pl.items[i].dur < 1.0f,
+                  "/ に休止が入っている (%.0f ms)", pl.items[i].dur);
+    }
+}
+
+/* ガ行鼻濁音: 語頭は [g]、語中は [ŋ]。 */
+static void test_nasal_g(void)
+{
+    const YkPreset *ps = yk_preset(0);
+    YkPlan pl;
+
+    check(yk_plan_from_kana("がっこう", ps, &pl) == 0, "鼻濁音: がっこう の解析に失敗");
+    check(pl.count > 0 && pl.items[0].phone == YK_P_G,
+          "がっこう の語頭が鼻濁音になっている (phone=%d)", pl.count ? pl.items[0].phone : -1);
+
+    check(yk_plan_from_kana("かぎ", ps, &pl) == 0, "鼻濁音: かぎ の解析に失敗");
+    int found = 0;
+    for (int i = 0; i < pl.count; i++)
+        if (pl.items[i].phone == YK_P_NG) found = 1;
+    check(found, "かぎ の ぎ が鼻濁音になっていない");
+
+    check(yk_plan_from_kana("ありがとう", ps, &pl) == 0, "鼻濁音: ありがとう の解析に失敗");
+    found = 0;
+    for (int i = 0; i < pl.count; i++)
+        if (pl.items[i].phone == YK_P_NG) found = 1;
+    check(found, "ありがとう の が が鼻濁音になっていない");
+}
+
 int main(void)
 {
     printf("yukkuri engine %s\n", yk_version());
@@ -759,6 +878,10 @@ int main(void)
     test_sh_vs_s();
     test_stop_onset_click();
     test_pause_duration();
+    test_accent_pitch();
+    test_accent_uses_pitch_not_amp();
+    test_slash_is_not_glottal();
+    test_nasal_g();
     if (failures) {
         printf("\n%d 件のテストが失敗しました\n", failures);
         return 1;

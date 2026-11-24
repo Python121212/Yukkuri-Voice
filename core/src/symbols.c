@@ -18,6 +18,7 @@
  * かなを混ぜてもよい (「ゆっくりして ne」)。変換できない文字は読み飛ばす。
  */
 #include "internal.h"
+#include <math.h>
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -342,12 +343,20 @@ static void push(YkPlan *out, const YkPreset *ps, YkPhone ph, float amp)
 }
 
 /* 文末のアクセント記号 (0 なし, 1 上げ, -1 下げ) を、その時点の母音に反映する */
+/* 記号列の「'」で指定されたアクセント核を印だけ付けておく。
+   実際の F0 の段は yk_apply_accent() が句全体を見て決める
+   (日本語のアクセントは音量ではなくピッチで表す)。 */
 static void apply_accent(YkPlan *out, int acc)
 {
     if (acc == 0 || out->count == 0) return;
-    YkPhoneme *x = &out->items[out->count - 1];
-    if (x->phone > YK_P_O) return;
-    x->amp = acc > 0 ? 1.15f : 0.85f;
+    for (int i = out->count - 1; i >= 0; i--) {
+        YkPhone p = (YkPhone)out->items[i].phone;
+        if (p == YK_P_PAUSE) return;
+        if (p <= YK_P_O || p == YK_P_Y || p == YK_P_W || p == YK_P_R) {
+            out->items[i].accent = (acc > 0) ? 1 : -1;
+            return;
+        }
+    }
 }
 
 /* 直前の母音を 1 モーラ伸ばす (長音) */
@@ -404,6 +413,176 @@ static void nasal_assimilation(YkPlan *out)
     }
 }
 
+
+/* ------------------------------------------------------------------ */
+/* 韻律: アクセント句と F0                                            */
+/* ------------------------------------------------------------------ */
+
+/* モーラを数える単位か (子音はモーラに数えない)。 */
+static int is_mora_head(YkPhone p)
+{
+    return p <= YK_P_O || p == YK_P_Y || p == YK_P_W || p == YK_P_R ||
+           p == YK_P_N || p == YK_P_NG || p == YK_P_NA || p == YK_P_M;
+}
+
+/* アクセント句を割り当て、モーラごとの F0 を決める。
+
+   日本語のアクセントは「音の高さ」で表す。同じ音素列でも
+     は'し   (箸) … 1 拍目が高く、2 拍目で下がる
+     はし'   (橋) … 2 拍目まで上がって、そのあと下がる
+     はし    (端) … 平板。下がり目が無く、助詞が付くと上がる
+   のように意味が変わる。以前は「'」を直前モーラの音量 (amp) に
+   反映するだけで、F0 には一切触れていなかったため、どれも同じに
+   聞こえていた。
+
+   記号列で「'」が指定された句はその位置をアクセント核として尊重し、
+   指定の無い句 (かな入力など) は、句のモーラ数から
+   「頭高 / 中高 / 平板」を推定する。 */
+void yk_apply_accent(YkPlan *out)
+{
+    if (!out || out->count <= 0) return;
+
+    int i = 0;
+    while (i < out->count) {
+        /* --- 1 つのアクセント句 [i, end) を切り出す --- */
+        if (out->items[i].phone == YK_P_PAUSE) { i++; continue; }
+        int end = i;
+        while (end < out->count && out->items[end].phone != YK_P_PAUSE) end++;
+
+        /* モーラ番号を振る。
+           子音は「後ろに来る母音」と同じモーラに属する (か の k と a は
+           同じモーラ)。以前は逆に「直前のモーラ」へ入れていたため、
+           はし の sh が 1 拍目に数えられ、アクセントの段が 1 拍ずれていた。
+           まず母音側で番号を振り、子音は後ろ向きに埋める。 */
+        int mora = 0;
+        for (int k = i; k < end; k++) {
+            YkPhone p = (YkPhone)out->items[k].phone;
+            if (p == YK_P_PAUSE) continue;
+            if (is_mora_head(p)) out->items[k].mora = (uint8_t)mora++;
+            else out->items[k].mora = 0xFF;      /* あとで埋める */
+        }
+        /* 子音は次の母音 (モーラ) の番号を借りる。後ろに母音が無ければ
+           直前のモーラに付ける。 */
+        for (int k = end - 1; k >= i; k--) {
+            if (out->items[k].phone == YK_P_PAUSE) continue;
+            if (out->items[k].mora != 0xFF) continue;
+            int m = 0;
+            for (int j = k + 1; j < end; j++) {
+                if (out->items[j].mora != 0xFF) { m = out->items[j].mora; break; }
+            }
+            out->items[k].mora = (uint8_t)m;
+        }
+        if (mora == 0) { i = end; continue; }
+
+        /* 「'」で指定された核 (この句の最初のもの) を探す */
+        int acc = -1;
+        for (int k = i; k < end; k++) {
+            if (out->items[k].accent != 0) {
+                acc = out->items[k].mora;
+                if (acc >= mora) acc = mora - 1;
+                break;
+            }
+        }
+        /* 指定が無ければ、句の長さから推定する。
+           日本語は平板 (下がり目なし) が最も多いので、それを既定にしつつ、
+           3 モーラ以上は中高にして「平板一辺倒」の機械っぽさを避ける。 */
+        if (acc < 0) {
+            if (mora >= 4) acc = mora - 2;   /* 中高: 後ろから 2 拍目で下がる */
+            else acc = -1;                   /* 平板 */
+        }
+
+        for (int k = i; k < end; k++) {
+            out->items[k].moras = (uint8_t)(mora > 255 ? 255 : mora);
+            if (out->items[k].accent != 0 && out->items[k].phone > YK_P_O)
+                out->items[k].accent = 0;    /* 子音に付いた印は捨てる */
+        }
+
+        /* --- モーラごとの F0 --- */
+        /* 基準ピッチは句の先頭の値。ループの中で書き換えるので、
+           必ずここで控えておく。以前これを参照し直していたため、
+           2 拍目以降が「既に下げた 1 拍目の値」を基準にしてしまい、
+           句全体がどんどん沈んでいた (実測 平均 241Hz / プリセット 280Hz)。 */
+        const float base_f0 = out->items[i].f0;
+        for (int k = i; k < end; k++) {
+            YkPhoneme *ph = &out->items[k];
+            YkPhone p = (YkPhone)ph->phone;
+            int m = ph->mora;
+
+            /* ピッチを決めるのは母音 (と半母音)。無声子音は比喩的に同じ値。 */
+            float semis = 0.0f;
+
+            /* 1) アクセントの段。日本語の標準的な規則:
+                 平板 (核なし)   … 1 拍目が低く、2 拍目から高いまま下がらない
+                 頭高 (核 = 0)   … 1 拍目が高く、すぐ下がる
+                 中高/尾高 (核=N)… 1 拍目が低く、N 拍目まで高く、そのあと下がる
+               「低い段」は基準ピッチの -2.2 半音、「高い段」は基準そのもの。
+               段の差を絶対値で持つことで、平板で上がり、頭高で下がる形が
+               はっきり出る。 */
+            /* 高い段 = プリセットのピッチそのもの、低い段 = -2.2 半音。
+               日本語は平板 (高い段が続く) が最も多いので、耳に届く声の
+               高さは高い段で決まる。高い段を基準に置けば、アクセントを
+               付けても声質 (= プリセットのピッチ) が変わらない。
+               逆に対称 (±1.1) にすると、高い段が続く分だけ声全体が
+               高く聞こえてしまう (実測 279 → 296Hz)。 */
+            const float high = 0.0f, low = -2.2f;
+            if (acc < 0) {                       /* 平板: 低 → 高 → 高 */
+                semis = (m == 0) ? low : high;
+            } else if (acc == 0) {               /* 頭高: 高 → 低 → 低 */
+                semis = (m == 0) ? high : low;
+            } else {                             /* 中高・尾高 */
+                if (m == 0) semis = low;
+                else if (m <= acc) semis = high;
+                else semis = low;
+            }
+
+            /* 2) 句の中のゆるい下げ (declination)。句の最後の 1 拍だけ。
+               全拍に掛けると、平板の 1 拍目 (低い段) と 2 拍目 (高い段) が
+               そろって沈み、耳に届く高さがプリセットより下がる
+               (実測 262Hz / プリセット 280Hz)。下げは句末に寄せる。 */
+            if (m + 1 >= mora) semis -= 0.5f;
+
+            /* 3) 文末の下げ。句の最後の母音だけ。 */
+            int remains = mora - 1 - m;
+            int at_end = (end >= out->count) || (out->items[end].phone == YK_P_PAUSE);
+            if (at_end && remains <= 0) semis -= 1.0f;
+
+            ph->f0 = base_f0 * powf(2.0f, semis / 12.0f);
+            /* 音量はアクセントに使わない (音量ではなくピッチで表す)。
+               母音は 1.0、子音は音素テーブルの値 (0.70 など)。
+               かな経路は子音も amp=1.0 で積んでくるので、ここで
+               テーブル値にそろえて子音を埋もれさせない。 */
+            if (p <= YK_P_O || p == YK_P_Y || p == YK_P_W || p == YK_P_R)
+                ph->amp = 1.0f;
+            else if (p != YK_P_PAUSE && p != YK_P_CL && p != YK_P_GLOTTAL)
+                ph->amp = yk_phone_info(p)->amp;
+        }
+        i = end;
+    }
+}
+
+/* ガ行鼻濁音 (鼻にかかった が行)。
+   日本語では語頭の が行 は破裂音 [g]、語中・語尾では鼻音 [ŋ] になる
+   (「がっこう」の が は [g]、「かぎ」の ぎ は [ŋ])。
+   AquesTalk の音声記号列仕様でも内部ルールとして自動適用される。
+   ここでは「語頭以外の が行」を YK_P_NG に置き換える。
+   ただし「ん」の直後は同化 (nasal_assimilation) と重なるので触らない。 */
+static void nasal_voiced_g(YkPlan *out)
+{
+    int word_start = 1;
+    for (int i = 0; i < out->count; i++) {
+        YkPhone p = (YkPhone)out->items[i].phone;
+        if (p == YK_P_PAUSE) { word_start = 1; continue; }
+        if (p == YK_P_G && !word_start) {
+            /* 直前が ん の場合は nasal_assimilation が処理済み */
+            YkPhone pv = (i > 0) ? (YkPhone)out->items[i - 1].phone : YK_P_PAUSE;
+            if (pv != YK_P_N && pv != YK_P_NG && pv != YK_P_NA && pv != YK_P_M)
+                out->items[i].phone = (uint8_t)YK_P_NG;
+        }
+        /* 母音・撥音・促音のあとは語中とみなす */
+        word_start = 0;
+    }
+}
+
 /* 後ろで定義する規則 */
 static void flap_r(YkPlan *out);
 static void devoice_vowels(YkPlan *out);
@@ -412,6 +591,7 @@ static void final_weak(YkPlan *out);
 void yk_apply_allophones(YkPlan *out)
 {
     nasal_assimilation(out);
+    nasal_voiced_g(out);
     flap_r(out);
     devoice_vowels(out);
     final_weak(out);
@@ -527,6 +707,7 @@ int yk_plan_from_symbols(const char *text, const YkPreset *preset, YkPlan *out)
     const char *s = text;
     int acc = 0;
 
+
     while (*s) {
         uint32_t cp = 0;
         const char *nx = next_char_utf8(s, &cp);
@@ -534,22 +715,42 @@ int yk_plan_from_symbols(const char *text, const YkPreset *preset, YkPlan *out)
 
         /* 空白と記号 */
         if (c0 == ' ' || c0 == '\t' || c0 == '\n' || c0 == '\r') { s = nx; continue; }
-        if (c0 == ',' || c0 == '.' || c0 == '-' || cp == 0x3001 || cp == 0x3002) {
+        /* 句切記号。AquesTalk の音声記号列仕様に倣って区別する。
+             。、  … 長いポーズ (文・呼気段落の区切り)
+             ,    … 短いポーズ
+             /    … アクセント句の境界。ポーズは入れない
+                    (以前はここに休止を入れていたため、
+                     「あ/い」が「あッい」のように切れていた)
+             ;    … 声立て (ポーズ無し。次の句が高く始まる)
+             +    … 副次アクセント (ポーズ無し) */
+        if (c0 == ',' || cp == 0x3001) {
+            yk_plan_push(out, YK_P_PAUSE, 220.0f, preset->pitch, 1.0f);
+            s = nx; continue;
+        }
+        if (c0 == '.' || cp == 0x3002) {
             yk_plan_push(out, YK_P_PAUSE, 320.0f, preset->pitch, 1.0f);
+            s = nx; continue;
+        }
+        if (c0 == '/' || c0 == ';' || c0 == '+') {
+            /* アクセント句の境界。ポーズは入れず、句を切るだけ。
+               yk_apply_accent() は休止 (YK_P_PAUSE) で句を区切るので、
+               長さ 0 の休止を 1 つ置いて境界を伝える。
+               長さ 0 の休止は音声には現れない (無音の挿入にならない)。 */
+            yk_plan_push(out, YK_P_PAUSE, 0.0f, preset->pitch, 1.0f);
             s = nx; continue;
         }
         if (c0 == ':' || cp == 0x30FC || cp == 0x301C) {
             lengthen(out);
             s = nx; continue;
         }
-        if (c0 == '\'') { acc = 1; s = nx; continue; }
-        if (c0 == '`') { acc = -1; s = nx; continue; }
-        if (c0 == '\'' ) { s = nx; continue; }
-        if (c0 == '/') {
-            /* 区切り記号としての / は休止 (「a/k/a」のような記法は想定しない) */
-            yk_plan_push(out, YK_P_PAUSE, 200.0f, preset->pitch, 1.0f);
+        if (c0 == '\'') {
+            /* 「'」はアクセント核。ここでは「直前に積んだモーラ」に印を
+               付ける (記号の直後に音素を待たない)。文末の はし' のように
+               後ろに何も無い場合も、この時点で印が付く。 */
+            apply_accent(out, 1);
             s = nx; continue;
         }
+        if (c0 == '`') { apply_accent(out, -1); s = nx; continue; }
         if (cp == 0x309B || cp == 0x309C) { s = nx; continue; }  /* 濁点単体 */
 
         /* かな */
@@ -637,6 +838,9 @@ int yk_plan_from_symbols(const char *text, const YkPreset *preset, YkPlan *out)
 
     /* 異音規則 */
     yk_apply_allophones(out);
+    /* 韻律 (アクセント句と F0)。記号列の「'」を核として尊重し、
+       指定の無い句は句の長さから平板/中高を推定する。 */
+    yk_apply_accent(out);
 
     return 0;
 }

@@ -111,6 +111,22 @@ static inline float reson_run(Reson *r, float x)
     return y;
 }
 
+/* 帯域ノイズ用の共振器。
+   reson_run はそのままだと中心周波数でゲインが 1 だが、白色雑音を通すと
+   帯域幅が狭いほど出力の rms が小さくなる。実測では「し」を狭くしたときに
+   ノイズが 15dB 以上落ちて、母音だけが残り子音が消えた。
+   入力を自分の共振器の rms ゲインで割って、帯域幅によらず
+   rms が一定になるようにする。BAND_RMS_NORM = 1/sqrt(BW/(2*sr)) 相当。 */
+static inline float reson_run_norm(Reson *r, float x, float bw, float sr)
+{
+    float y = r->a * x + r->b * r->y1 + r->c * r->y2;
+    r->y2 = r->y1;
+    r->y1 = y;
+    /* 帯域幅 BW の 2 次共振器の雑音利得 ~ sqrt(sr / (2*BW)) */
+    float g = bw > 100.0f ? bw : 100.0f;
+    return y / sqrtf(sr / (2.0f * g));
+}
+
 /* ---------------- 二次ローパス (バターワース) ---------------- */
 /* 破裂音の破裂を 1-4kHz に収めるために使う。一次だと -6dB/oct しか
    落ちないので、高域が残って「プスッ」と金属的に鳴る。 */
@@ -581,7 +597,7 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
                摩擦ノイズ。帯域共振器の出力は入力 (白色雑音, rms≈0.58) に
                対して Q のぶんだけ大きくなるので、生成後に正規化する。 */
             float nz = rnd_next(&rnd);
-            float nzBand = reson_run(&nres, nz);
+            float nzBand = reson_run_norm(&nres, nz, cur.noiseBw, sr);
             float nzLow = nz - onep_lp(&noiseLp, nz);
             /* 帯域ノイズ: 中心周波数のまわりに集める (実効 rms を一定に) */
             float noise = (nzBand * 1.35f + nzLow * 0.12f) * cur.noise * 4.0f;

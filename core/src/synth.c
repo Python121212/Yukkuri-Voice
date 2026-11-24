@@ -295,9 +295,14 @@ static int find_vowel_fwd(const YkPlan *pl, int idx)
 static float closure_ms(YkPhone p)
 {
     switch (p) {
-    case YK_P_P: case YK_P_T: case YK_P_K: return 55.0f;
-    case YK_P_B: case YK_P_D: case YK_P_G: return 40.0f;
-    case YK_P_GLOTTAL: return 20.0f;
+    /* 破裂音の閉鎖。55ms は日本語の /k/ /t/ /p/ としては長すぎて、
+       音節の間に 1/4 秒近い「間」が空き、プツプツ切れて聞こえた。
+       実測の日本語の閉鎖は 30-40ms 程度。 */
+    case YK_P_P: case YK_P_T: case YK_P_K: return 35.0f;
+    case YK_P_B: case YK_P_D: case YK_P_G: return 25.0f;
+    /* 声門破裂は「直前の母音を急に切る」音なので、ここでは短くする。
+       長いと母音のあとに突然の無音が入り、プツと切れて聞こえる。 */
+    case YK_P_GLOTTAL: return 8.0f;
     /* 鼻音: 口の閉鎖ぶん。声帯は鳴り続けるので下の処理で減衰させる。 */
     case YK_P_M: case YK_P_N: case YK_P_NG: case YK_P_NA: return 45.0f;
     default: return 0.0f;
@@ -415,6 +420,7 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     float jitterWander = 0.0f;      /* よりゆっくりした周期のうねり */
     float shimmer = 0.0f;           /* 周期ごとの振幅ゆらぎ */
     float prevRad = 0.0f;
+    float prevOut = 0.0f;           /* 閉鎖中に残す直前の出力 (リリース用) */
     long vibPhase = 0;
     float vibPhaseOff = 0.0f;       /* 母音ごとにビブラートの位相をずらす */
     float vib = 0.0f;
@@ -467,6 +473,10 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
        同じバッファで正規化すると、母音の素の音量が小さい母音 (う, お) の
        ときに摩擦音だけが持ち上がって耳障りになる。 */
     float *noiseBuf = (float *)calloc((size_t)(total > 0 ? total : 1), sizeof(float));
+    /* 破裂のバースト専用バッファ。摩擦音と同じバッファに入れると、
+       最強のノイズ窓 (摩擦音) に合わせて全体が -12dB にされ、短い
+       バーストが埋もれて「無音」になる。別に持って個別に正規化する。 */
+    float *burstBuf = (float *)calloc((size_t)(total > 0 ? total : 1), sizeof(float));
     float prevRadN = 0.0f;
 
     float clickEnv = 0.0f;
@@ -522,8 +532,10 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
         }
         /* 破裂音のノイズは「破裂の瞬間」だけ。音素テーブルの noise を
            そのまま使うと、子音の長さぶん (60-80ms) ずっとノイズが鳴り、
-           「ぷしゅ」という息の音になる。破裂音の音は閉鎖 + 短い破裂。 */
-        if (is_stop(p)) target.noise = 0.0f;
+           「ぷしゅ」という息の音になる。破裂音の音は閉鎖 + 短い破裂。
+           ただし完全に 0 にすると閉鎖明けがほぼ無音になり、母音との間が
+           切り離されて「プツ」と切れるので、気息として少しだけ残す。 */
+        if (is_stop(p)) target.noise *= 1.6f;
         if (p != YK_P_PAUSE && p > YK_P_O) {
             int pv = find_vowel_back(plan, idx);
             int nv = find_vowel_fwd(plan, idx);
@@ -554,6 +566,7 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
            口側の共鳴だけを鼻に切り替える (ここでは閉鎖ぶんを無声化せず、
            音量を 0.25 倍まで落として「鼻でこもる」区間を作る)。 */
         int isNasal = (p == YK_P_M || p == YK_P_N || p == YK_P_NG || p == YK_P_NA);
+        const float relCoef = expf(-1.0f / (0.008f * sr));   /* 8ms のリリース */
         long n_clo = (long)(closure_ms(p) * sr / 1000.0f) + closureLeft;
         closureLeft = 0;
         for (long s = 0; s < n_clo && pos < total; s++, pos++) {
@@ -581,7 +594,11 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             burstHp = 0.0f;
             biquad_lp_reset(&radNLp);
             biquad_lp_reset(&burstLp);
-            out[pos] = 0.0f;
+            /* 閉鎖中も直前の音を指数減衰 (τ = 8ms) で残す。
+               完全な 0 を書くと波形が矩形状に切れ、耳には「プツ」という
+               クリックとして聞こえる。鼻音は声帯が続くのでゆっくり減衰。 */
+            out[pos] = prevOut;
+            prevOut *= isNasal ? 0.9995f : relCoef;
             if (noiseBuf) noiseBuf[pos] = 0.0f;
             if (voicedHist) voicedHist[pos] = 0.0f;
         }
@@ -645,6 +662,11 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             /* 母音は子音の直後からすぐ声を出す (頼りない立ち上がりを防ぐ)。
                子音自身はノイズで作るので、有声を早く入れても濁らない。 */
             float tV = isPause ? 0.0f : (p <= YK_P_O ? target.voiced : target.voiced);
+            if (!isPause && p != YK_P_CL && !is_stop(p) && !(isFric && !target.voiced)) {
+                /* 有声が途切れない音 (母音・鼻音・流音・半母音・有声子音) は
+                   直前の値を下回らないようにして、音節間の谷を作らない。 */
+                if (tV < cur.voiced) tV = cur.voiced;
+            }
             cur.voiced += (tV - cur.voiced) * glideAmpAtk;
             cur.amp += (target.amp - cur.amp) * glideAmpAtk;
             cur.gain += (target.gain - cur.gain) * glideAmpAtk;
@@ -717,6 +739,7 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             float nzLow = nz - onep_lp(&noiseLp, nz);
             /* 帯域ノイズ: 中心周波数のまわりに集める (実効 rms を一定に) */
             float noise = (nzBand * 1.35f + nzLow * 0.12f) * cur.noise * 4.0f;
+            float burstOut = 0.0f;      /* 破裂のバースト (別バッファへ) */
 
             /* ---- 破裂音のバースト ----
                実際の破裂は 5-10ms の短いノイズ。長く鳴らすと「ぷしゅ」
@@ -744,8 +767,14 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
                    バーストの最初の数サンプルが「カチッ」というクリックに
                    なってしまうので、低域は 3ms かけて後から入れる。 */
                 float envB = clickEnv * clickAtk * burstAtk;
-                noise += biquad_lp_run(&burstLp, burst - burstHp) * envB * lowFade;
-                clickEnv *= 0.99270f;                        /* τ ≈ 2.5ms */
+                /* バーストの音量。3 倍では母音に対して -27dB しか出ず、
+                   聞こえないので「無音のあと母音が始まる」ように聞こえていた。
+                   破裂音は母音より 15-20dB 小さいのが自然なので、そこまで上げる。 */
+                burstOut = biquad_lp_run(&burstLp, burst - burstHp) * envB * lowFade * 9.0f;
+                /* 減衰の時定数。2.5ms だと立ち上がり (3ms) と重なって
+                   エネルギーが残らず、破裂音が事実上の無音になっていた。
+                   実際の /k/ /t/ の破裂は 10-20ms 鳴るので τ = 9ms にする。 */
+                clickEnv *= 0.99770f;                        /* τ ≈ 9ms */
             }
 
             /* ---- 並列フォルマントバンク ----
@@ -785,7 +814,9 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             rad = onep_lp(&radLp, rad);
 
             out[pos] = rad * cur.amp * ph->amp * cur.gain;
+            prevOut = out[pos];
             if (noiseBuf) noiseBuf[pos] = radN * cur.amp * fricRel;
+            if (burstBuf) burstBuf[pos] = burstOut * cur.amp;
             if (voicedHist) voicedHist[pos] = cur.voiced;
         }
 
@@ -874,6 +905,30 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
         noiseBuf = NULL;
     }
 
+    /* ---- 破裂バーストのミックス ----
+       摩擦音とは別に正規化する。破裂は 10-20ms しかないので、同じ基準で
+       そろえるとエネルギーが足りず聞こえない。有声の最強窓に対して
+       -6dB に合わせる (破裂は母音より少し小さいのが自然)。 */
+    if (burstBuf) {
+        const long win = (long)(0.020f * sr);
+        double peakV = 0.0, peakB = 0.0;
+        for (long i = 0; i + win <= pos; i += win) {
+            double av = 0.0, ab = 0.0;
+            for (long j = 0; j < win; j++) {
+                av += (double)out[i + j] * out[i + j];
+                ab += (double)burstBuf[i + j] * burstBuf[i + j];
+            }
+            if (av > peakV) peakV = av;
+            if (ab > peakB) peakB = ab;
+        }
+        if (peakB > 1e-12 && peakV > 1e-12) {
+            float g = (float)(sqrt(peakV / peakB) * 0.5);    /* -6dB */
+            for (long i = 0; i < pos; i++) out[i] += burstBuf[i] * g;
+        }
+        free(burstBuf);
+        burstBuf = NULL;
+    }
+
     /* ---- DC 除去 ----
        ローパス型の DC 除去は極が 0.9998 なので、無音に入っても直前の値が
        数百サンプルかけて 0 へ戻る。その戻りが破裂の頭で切り替わって
@@ -888,7 +943,12 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             if (i + n2 > pos) n2 = pos - i;
             double e = 0.0;
             for (long j = 0; j < n2; j++) e += (double)out[i + j] * out[i + j];
-            if (sqrt(e / (double)n2) < 0.0015) {
+            /* 無音とみなす閾値。ここを 1.5e-3 にしていたため、母音の
+               減衰しきる前の「-50dB くらいの息づかい」まで 0 に落とし、
+               音節の切れ目が完全なデジタル無音になって「プツ」と切れて
+               聞こえていた。本当の無音だけを対象にする。
+               0 を書くのは、直前が十分小さいときだけにする。 */
+            if (sqrt(e / (double)n2) < 0.00002) {
                 for (long j = 0; j < n2; j++) out[i + j] = 0.0f;
                 dcX = 0.0f; dcY = 0.0f;
                 i += n2;
@@ -1005,7 +1065,14 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             /* この 1ms が無音か */
             double e = 0.0;
             for (long i = b; i < b + hop && i < pos; i++) e += (double)out[i] * out[i];
-            if (sqrt(e / (double)hop) > 0.0015) continue;
+            /* 無音判定の閾値。
+               1.5e-3 (= -56dB) にしていたため、母音の自然な減衰や
+               破裂音の閉鎖 (どちらも -40〜-55dB) まで「無音」と判定し、
+               その手前 18ms をコサインで 0 まで削っていた。しかも
+               削った結果さらに小さい区間が生まれて判定が続くため、
+               母音の後半が丸ごと消えて「プツ」と切れていた。
+               本当の無音 (-76dB 以下) だけを対象にする。 */
+            if (sqrt(e / (double)hop) > 0.00004) continue;
             /* 直前に続いていた有音の終端 = b。その手前を下げる。 */
             long len = rel;
             if (len > b) len = b;
@@ -1024,7 +1091,7 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
                 if (bb + hop >= pos) { h = nh; break; }
                 double e2 = 0.0;
                 for (long i = bb; i < bb + hop; i++) e2 += (double)out[i] * out[i];
-                if (sqrt(e2 / (double)hop) > 0.0015) break;
+                if (sqrt(e2 / (double)hop) > 0.00004) break;
                 h++;
             }
         }

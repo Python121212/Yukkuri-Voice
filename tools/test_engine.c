@@ -856,6 +856,63 @@ static void test_nasal_g(void)
     check(found, "ありがとう の が が鼻濁音になっていない");
 }
 
+
+/* ---- ザラつき (広帯域ノイズ) ----------------------------------------- */
+
+/* 子音・閉鎖・気息に「ザー」という広帯域ノイズが乗っていないこと。
+   以前は次の 3 経路が 8kHz 以上まで平坦な白色雑音を通していた:
+     1) 閉鎖中の息の床 (1 極 LP のみ、-3dB が 4.1kHz)
+     2) nzLow = nz - LP(nz)  (2.5kHz 以上のハイパスを直接混ぜていた)
+     3) 破裂の burst - burstHp (先に絞らずに差し引いていたため
+        ナイキスト近くまで成分が残っていた)
+   母音は -80dB 程度、子音でも -17dB 以下であることを確かめる。 */
+static double hf_ratio_db(const float *x, int n, int sr)
+{
+    int len = n < 4096 ? n : 4096;
+    double re, im, lo = 0, hi = 0;
+    for (int k = 0; k < len / 2; k++) {
+        double f = (double)k * sr / len;
+        re = im = 0;
+        for (int i = 0; i < len; i++) {
+            double w = 0.5 - 0.5 * cos(2.0 * M_PI * i / (len - 1));
+            double a = -2.0 * M_PI * f * i / sr;
+            re += x[i] * w * cos(a);
+            im += x[i] * w * sin(a);
+        }
+        double p = re * re + im * im;
+        if (f > 8000.0) hi += p; else lo += p;
+    }
+    if (hi + lo <= 0) return -200.0;
+    return 10.0 * log10((hi + 1e-30) / (lo + hi + 1e-30));
+}
+
+static void test_no_broadband_hiss(void)
+{
+    const YkPreset *ps = yk_preset(0);
+    enum { N = YK_SR * 3 };
+    static float buf[N];
+    const char *words[] = { "か", "た", "ゆっくり", "きっと" };
+    for (int w = 0; w < 4; w++) {
+        int n = yk_speak_kana(words[w], ps, buf, N, NULL, 0);
+        check(n > 0, "ヒス: 合成失敗 %s", words[w]);
+        if (n <= 0) continue;
+        /* 有声窓の中で最も「8kHz 以上の割合」が高いところを見る */
+        int win = YK_SR / 50;      /* 20ms */
+        int hop = YK_SR / 100;     /* 10ms */
+        double worst = -200.0; double worstT = 0;
+        for (int i = 0; i + win <= n; i += hop) {
+            float pk = 0;
+            for (int j = 0; j < win; j++) if (fabsf(buf[i + j]) > pk) pk = fabsf(buf[i + j]);
+            if (pk < 0.02f) continue;          /* 無音は対象外 */
+            double r = hf_ratio_db(buf + i, win, YK_SR);
+            if (r > worst) { worst = r; worstT = (double)i / YK_SR; }
+        }
+        check(worst < -16.0,
+              "%s: 8kHz 以上のノイズが多すぎる (%.1f dB at %.2fs)",
+              words[w], worst, worstT);
+    }
+}
+
 int main(void)
 {
     printf("yukkuri engine %s\n", yk_version());
@@ -882,6 +939,7 @@ int main(void)
     test_accent_uses_pitch_not_amp();
     test_slash_is_not_glottal();
     test_nasal_g();
+    test_no_broadband_hiss();
     if (failures) {
         printf("\n%d 件のテストが失敗しました\n", failures);
         return 1;

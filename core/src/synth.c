@@ -407,8 +407,15 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
        掛かるので、折れ点を 3.5kHz まで下げると /s/ の 5-7kHz まで
        削れて「し」「す」「さ」がぼやける。バーストだけ別に絞る。 */
     biquad_lp_set(&radNLp, 6000.0f, sr);
+    BiquadLp noiseLpBi;     /* 摩擦/気息ノイズの帯域制限 (8kHz) */
+    BiquadLp burstRawLp;    /* 破裂の生ノイズを 2.5kHz に絞る */
+    float burstRaw = 0.0f;
     BiquadLp burstLp;       /* 破裂のバースト専用 (1-4kHz に収める) */
     biquad_lp_reset(&burstLp);
+    biquad_lp_set(&noiseLpBi, 8000.0f, sr);
+    biquad_lp_reset(&noiseLpBi);
+    biquad_lp_set(&burstRawLp, 2500.0f, sr);
+    biquad_lp_reset(&burstRawLp);
     biquad_lp_set(&burstLp, 3200.0f, sr);
 
     Rnd rnd = { 0x9E3779B9u };
@@ -495,7 +502,8 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     long pos = 0;
     long closureLeft = 0;
     float relCoefRun = 0.999f;      /* 閉鎖中の減衰係数 (閉鎖長に応じて決める) */
-    float breathLp = 0.0f;          /* 閉鎖中に敷く息の床 */
+    float breathLp = 0.0f;          /* 閉鎖中に敷く息の床 (1 段目) */
+    float breathLp2 = 0.0f;         /* 同 (2 段目) */
 
     for (int idx = 0; idx < plan->count && pos < total; idx++) {
         const YkPhoneme *ph = &plan->items[idx];
@@ -618,11 +626,17 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
                無声母音 (き の i°) のあとでは直前がほぼ 0 なので、
                閉鎖が丸ごとデジタル無音になる (きっと で実測 88ms)。
                声帯を閉じた瞬間にも口の中の空気は動いているので、
-               ごく小さい息を常に敷いておく。 */
+               ごく小さい息を常に敷いておく。
+               ただし「白色雑音を 1 極で軽く丸めただけ」にしていたため、
+               -3dB が 4.1kHz のほぼ広帯域ノイズになり、閉鎖のたびに
+               「ザー」というノイズが乗っていた (全帯域で -6dB 平坦)。
+               声道を通った息は 500Hz 以下の暗い音なので、2 極で
+               しっかり落として低域だけを残す。 */
             {
                 float br = rnd_next(&rnd);
-                breathLp += (br - breathLp) * 0.35f;
-                out[pos] = prevOut + breathLp * 0.010f;
+                breathLp  += (br - breathLp) * 0.055f;   /* -3dB ≈ 420Hz */
+                breathLp2 += (breathLp - breathLp2) * 0.055f;
+                out[pos] = prevOut + breathLp2 * 0.075f;
             }
             prevOut *= isNasal ? 0.99995f : relCoefRun;
             if (noiseBuf) noiseBuf[pos] = 0.0f;
@@ -762,9 +776,13 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
                対して Q のぶんだけ大きくなるので、生成後に正規化する。 */
             float nz = rnd_next(&rnd);
             float nzBand = reson_run_norm(&nres, nz, cur.noiseBw, sr);
-            float nzLow = nz - onep_lp(&noiseLp, nz);
             /* 帯域ノイズ: 中心周波数のまわりに集める (実効 rms を一定に) */
-            float noise = (nzBand * 1.35f + nzLow * 0.12f) * cur.noise * 4.0f;
+            float noise = (nzBand * 1.35f) * cur.noise * 4.0f;
+            /* ノイズは 8kHz で頭打ちにする。これをしないと放射特性
+               (radN = noise - 0.9*prevRad の高域通過) が、ナイキスト近く
+               まで平らな白色雑音をそのまま通してしまい、子音や気息の
+               たびに「ザー」という広帯域ノイズが乗る。 */
+            noise = biquad_lp_run(&noiseLpBi, noise);
             float burstOut = 0.0f;      /* 破裂のバースト (別バッファへ) */
 
             /* ---- 破裂音のバースト ----
@@ -777,7 +795,12 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
                    相対的に目立つようになったので、もっとゆっくり立ち上げる。 */
                 if (burstAtk < 1.0f) burstAtk += burstAtkStep;
                 if (burstAtk > 1.0f) burstAtk = 1.0f;
-                burst += (rnd_next(&rnd) - burst) * 0.35f;
+                /* 生の乱数を一度 2 極 LP で 2.5kHz に絞ってから、
+                   低域を差し引いて「破裂らしい中高域」だけにする。
+                   先に絞らないと、差し引いた残りにナイキスト近くまで
+                   平らな成分が残り、破裂のたびに「ザッ」と鳴る。 */
+                burstRaw += (rnd_next(&rnd) - burstRaw) * 0.35f;
+                burst = biquad_lp_run(&burstRawLp, burstRaw);
                 burstHp += (burst - burstHp) * 0.20f;
                 /* バーストの低域 (burstHp 側) は 3ms 遅れて入れる。
                    いきなり全帯域で鳴らすと最初の 1-2 サンプルが段差になる。 */

@@ -480,6 +480,19 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
        同じバッファで正規化すると、母音の素の音量が小さい母音 (う, お) の
        ときに摩擦音だけが持ち上がって耳障りになる。 */
     float *noiseBuf = (float *)calloc((size_t)(total > 0 ? total : 1), sizeof(float));
+    /* ノイズの正規化を音素ごとに行うためのバッファ。
+       以前は「その語の noiseBuf 全体の最強 20ms 窓」で割っていたので、
+       摩擦音を含まない語 (か た な ま ... 単独) では分母が子音の
+       ごく小さなノイズになり、ゲインが 4 倍 (上限) に張り付いていた。
+       その結果、破裂音の気息が母音の -8.8dB (目標 -12dB より大きい) で
+       0-8kHz の広帯域ノイズとして鳴り、「ざ」と聞こえていた。
+       正規化の基準は「その子音自身がどれだけノイズを出せるか」
+       (音素テーブルの noise) であるべきなので、音素ごとに測って
+       音素ごとに合わせる。 */
+    float *sealPeak = (float *)calloc((size_t)(plan->count > 0 ? plan->count : 1), sizeof(float));
+    float *sealVox  = (float *)calloc((size_t)(plan->count > 0 ? plan->count : 1), sizeof(float));
+    long *sealBeg   = (long *)calloc((size_t)(plan->count > 0 ? plan->count : 1), sizeof(long));
+    long *sealEnd   = (long *)calloc((size_t)(plan->count > 0 ? plan->count : 1), sizeof(long));
     /* 破裂のバースト専用バッファ。摩擦音と同じバッファに入れると、
        最強のノイズ窓 (摩擦音) に合わせて全体が -12dB にされ、短い
        バーストが埋もれて「無音」になる。別に持って個別に正規化する。 */
@@ -504,8 +517,10 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
     float relCoefRun = 0.999f;      /* 閉鎖中の減衰係数 (閉鎖長に応じて決める) */
     float breathLp = 0.0f;          /* 閉鎖中に敷く息の床 (1 段目) */
     float breathLp2 = 0.0f;         /* 同 (2 段目) */
+    int noiseCutRun = 6000;         /* ノイズ経路の現在の帯域上限 [Hz] */
 
     for (int idx = 0; idx < plan->count && pos < total; idx++) {
+        if (idx < plan->count) sealBeg[idx] = pos;
         const YkPhoneme *ph = &plan->items[idx];
         const YkPhone p = (YkPhone)ph->phone;
 
@@ -547,8 +562,15 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
            そのまま使うと、子音の長さぶん (60-80ms) ずっとノイズが鳴り、
            「ぷしゅ」という息の音になる。破裂音の音は閉鎖 + 短い破裂。
            ただし完全に 0 にすると閉鎖明けがほぼ無音になり、母音との間が
-           切り離されて「プツ」と切れるので、気息として少しだけ残す。 */
-        if (is_stop(p)) target.noise *= 1.6f;
+           切り離されて「プツ」と切れるので、気息として少しだけ残す。
+
+           以前は 1.6 倍にしていた (「プツプツ切れる」対策で気息を
+           聞こえる音量にした経緯)。ただしこれは子音の長さぶん
+           (75ms) ノイズを鳴らし続けることで、0-8kHz の広帯域ノイズが
+           そのまま「ザー」と聞こえていた。破裂音の息は摩擦音 (/s/ の
+           半分以下) なので、量を 0.3 倍に下げ、長さは 25ms に縮める。
+           無音にはしないので、母音との間が切り離されることはない。 */
+        if (is_stop(p)) target.noise *= 0.30f;
         if (p != YK_P_PAUSE && p > YK_P_O) {
             int pv = find_vowel_back(plan, idx);
             int nv = find_vowel_fwd(plan, idx);
@@ -701,6 +723,20 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             fricRel = 3000.0f / fc;         /* +6dB/oct ぶんの補正 */
             if (fricRel > 1.0f) fricRel = 1.0f;
             fricRel *= 0.95f;
+        }
+        /* ノイズ経路の帯域上限を音素ごとに切り替える。
+           破裂音の破裂直後に出るのは「息」で、声道がまだ開いていないので
+           2kHz 以下のもこもった音。以前はここも 6kHz まで通していたため、
+           0-8kHz の平らなノイズが 25ms 鳴り、「カ」が「ザ」に聞こえていた
+           (実測 5-12kHz が母音比 -8dB。設計は -12dB 以下)。
+           摩擦音 (/s/ /ɕ/ /h/ /f/) はその高域こそが音なので 6kHz のまま。 */
+        {
+            int wantCut = is_stop(p) ? 1200 : 6000;
+            if (wantCut != noiseCutRun) {
+                biquad_lp_set(&radNLp, (float)wantCut, sr);
+                biquad_lp_reset(&radNLp);
+                noiseCutRun = wantCut;
+            }
         }
 
         for (long s = 0; s < n && pos < total; s++, pos++) {
@@ -873,7 +909,15 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
 
             out[pos] = rad * cur.amp * ph->amp * cur.gain;
             prevOut = out[pos];
-            if (noiseBuf) noiseBuf[pos] = radN * cur.amp * fricRel;
+            if (noiseBuf) {
+                noiseBuf[pos] = radN * cur.amp * fricRel;
+                if (idx < plan->count) {
+                    float a = fabsf(noiseBuf[pos]);
+                    if (a > sealPeak[idx]) sealPeak[idx] = a;
+                    float b = fabsf(out[pos]);
+                    if (b > sealVox[idx]) sealVox[idx] = b;
+                }
+            }
             if (burstBuf) burstBuf[pos] = burstOut * cur.amp;
             if (voicedHist) voicedHist[pos] = cur.voiced;
         }
@@ -886,6 +930,7 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
                 out[bodyStart + k] *= w;
             }
         }
+        if (idx < plan->count) sealEnd[idx] = pos;
     }
 
     /* ---- 窓ごとの有声度 (音量正規化のため) ---- */
@@ -942,24 +987,52 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
 
        ここを -4dB にしていたときは /s/ が母音とほぼ同じ音量になり、
        母音に入る瞬間にノイズが止まって「シュ」と切れて聞こえた。
-       実際の破裂音・摩擦音は母音より 10-20dB 小さいので -12dB にする。 */
+       実際の破裂音・摩擦音は母音より 10-20dB 小さいので -12dB にする。
+
+       ただしこの正規化は「その語のノイズ経路の最大値」で割るので、
+       摩擦音をまったく含まない語では分母が鼻音のごく小さなノイズ
+       (な ま の noise 0.05) になり、ゲインが跳ね上がる。実測で
+       な/ま は 32倍 (か は 0.8倍) になり、鼻音の息が 39dB も増幅されて
+       「ざー」と鳴っていた。「な」だけを単独で言うと「ざ」に聞こえる、
+       という報告の正体がこれ。子音のノイズは母音より -12dB が上限なので、
+       ゲインにも上限 (最大 4 倍 = +12dB) を置く。摩擦音を含む語は
+       もともと 1 倍前後なので、この上限では変化しない。 */
     if (noiseBuf) {
-        const long win = (long)(0.020f * sr);
-        double peakV = 0.0, peakN = 0.0;
-        for (long i = 0; i + win <= pos; i += win) {
-            double av = 0.0, an = 0.0;
-            for (long j = 0; j < win; j++) {
-                av += (double)out[i + j] * out[i + j];
-                an += (double)noiseBuf[i + j] * noiseBuf[i + j];
-            }
-            if (av > peakV) peakV = av;
-            if (an > peakN) peakN = an;
-        }
-        if (peakN > 1e-12 && peakV > 1e-12) {
-            float g = (float)(sqrt(peakV / peakN) * 0.25);   /* -12dB */
-            for (long i = 0; i < pos; i++) out[i] += noiseBuf[i] * g;
+        float utterVox = 0.0f;
+        for (int idx = 0; idx < plan->count; idx++)
+            if (sealVox[idx] > utterVox) utterVox = sealVox[idx];
+        /* 正規化は音素ごと。各音素の区間を [start,end) で持ち、
+           その中の「ノイズの最大値」と「有声出力の最大値」から、
+           ノイズのピークが有声のピークより -12dB になるゲインを決める。
+           語全体で 1 つのゲインにすると、摩擦音を含まない語で
+           ゲインが上限まで跳ね上がり、気息が「ざ」になっていた。 */
+        for (int idx = 0; idx < plan->count; idx++) {
+            long b = sealBeg[idx], e = sealEnd[idx];
+            if (e > pos) e = pos;
+            if (e <= b) continue;
+            /* 休止 (句読点) にはノイズを混ぜない。休止の区間には
+               直前の母音の減衰が入り込むので、vPk (有声) だけが大きく
+               出て、ゲインが跳ね上がる。そのノイズが文末の母音の
+               後半を覆い、「文末が減衰で削られた」ように聞こえていた。 */
+            if (plan->items[idx].phone == YK_P_PAUSE) continue;
+            float nPk = sealPeak[idx], vPk = sealVox[idx];
+            /* 無声の子音 (/h/ /s/ など) の区間には有声出力が無いので、
+               vPk が 0 になる。その場合はその語の有声ピーク最大値
+               (utterVox) を基準にする。0 のまま基準にするとゲインが
+               決まらず、/h/ がまるごと消える (実際に消えていた)。 */
+            if (vPk <= 1e-6f) vPk = utterVox;
+            if (nPk <= 1e-6f || vPk <= 1e-6f) continue;
+            /* ピークで -12dB。窓のエネルギー比で測っていたときと
+               同じ音量になるよう、ピーク比の 0.25 を使う。 */
+            float g = (vPk / nPk) * 0.25f;
+            if (g > 4.0f) g = 4.0f;      /* 念のための上限 */
+            for (long i = b; i < e; i++) out[i] += noiseBuf[i] * g;
         }
         free(noiseBuf);
+        free(sealPeak);
+        free(sealVox);
+        free(sealBeg);
+        free(sealEnd);
         noiseBuf = NULL;
     }
 
@@ -984,6 +1057,7 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
                「プッ」と弾けて聞こえた。日本語の破裂は母音より
                15-20dB 小さいので -12dB 程度に落とす。 */
             float g = (float)(sqrt(peakV / peakB) * 0.25);   /* -12dB */
+            if (g > 4.0f) g = 4.0f;      /* 同上 (破裂の無い語) */
             for (long i = 0; i < pos; i++) out[i] += burstBuf[i] * g;
         }
         free(burstBuf);

@@ -592,6 +592,12 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
             float tau = nSec / 5.0f;
             if (tau > 0.030f) tau = 0.030f;   /* 長くても 30ms まで */
             if (tau < 0.004f) tau = 0.004f;
+            /* 声門破裂は「息を止める」音ではない。母音 «あ» の響きが
+               そのまま «い» に移るだけなので、閉鎖長から時定数を決めて
+               8ms で消しきる (5τ = n_clo) と、母音と母音のあいだが
+               完全な無音になり、その切り口が「ザッ」と聞こえる。
+               ここだけは 40ms の緩い減衰にして、響きを次の母音へ渡す。 */
+            if (p == YK_P_GLOTTAL) tau = 0.040f;
             relCoefRun = expf(-1.0f / (tau * sr));
         }
         for (long s = 0; s < n_clo && pos < total; s++, pos++) {
@@ -652,8 +658,11 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
         else if (p == YK_P_Z || p == YK_P_J) clickEnv = 0.10f;
         /* 破裂音はどれも閉鎖明けに声帯が立ち上がる。閉鎖中は声帯フェーズを
            進めていないので、明けた瞬間にパルスの位相が飛んでクリックになる。
-           4ms の立ち上がりを全破裂音と声門破裂に付ける。 */
-        const int voiceAtk = is_stop(p) || p == YK_P_GLOTTAL;
+           4ms の立ち上がりを全破裂音に付ける。
+           声門破裂には付けない。閉鎖中も声帯位相を進めているので位相は
+           飛んでおらず、ここで 0 から立ち上げると直前の母音の響きを
+           切り落として、境界ごとに幅広いクリック (実測 HF -35dB) になる。 */
+        const int voiceAtk = is_stop(p);
         const long bodyStart = pos;
         /* 母音が変わるたびにビブラートの開始位相をずらす。
            全部の母音が同じ位相で揺れると、機械的に聞こえる。

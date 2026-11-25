@@ -1154,6 +1154,140 @@ static void test_no_broadband_hiss(void)
     }
 }
 
+
+/* ---- round-19: 半母音・流音が鼻音と区別できるか ----
+
+   「や・ら・わ がすべて ま に聞こえる」という指摘への回帰テスト。
+
+   原因は音素テーブルではなく、子音フレームを前後母音へ寄せる係数だった。
+   旧値 (半母音 k=0.6 / 流音 k=0.85) では、子音中心での縦続応答が
+       ら F=[754,1276]  ま F=[746,1232]    (距離 1.8dB)
+   となり、/r/ が /m/ と実質同一になっていた。
+
+   ここでは実波形から測る。有声の半母音・流音は F2 が高く (や) または
+   F1 が低く (わ・ら)、鼻音の /m/ は F1=300 付近に山が立つ。
+   その差が「聞き分けられる大きさ」であることを数値で固定する。 */
+
+/* ある区間の F1/F2 探索。母音区間 (子音の直後) は全音素で同じになるので
+   必ず子音の区間 (頭 15-60ms) を見る。 */
+static void consonant_formants(const char *kana, double *f1, double *f2)
+{
+    *f1 = *f2 = 0;
+    int n = yk_speak_kana(kana, yk_preset(0), buf,
+                          (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+    if (n <= 0) return;
+    int st = SR * 15 / 1000;
+    int len = SR * 45 / 1000;
+    if (st + len > n) return;
+    double f0 = measured_f0(buf + st, len, SR);
+    if (f0 < 150 || f0 > 300) f0 = 235.0;
+    *f1 = formant_peak(buf + st, len, SR, f0, 200.0, 900.0);
+    *f2 = formant_peak(buf + st, len, SR, f0, 900.0, 2800.0);
+}
+
+static void test_semivowel_distinct_from_nasal(void)
+{
+    double m1, m2;
+    consonant_formants("ま", &m1, &m2);
+    check(m1 > 0 && m2 > 0, "ま: 子音区間のフォルマントが取れない");
+    if (m1 <= 0) return;
+
+    const char *kana[3] = { "や", "ら", "わ" };
+    for (int i = 0; i < 3; i++) {
+        double f1, f2;
+        consonant_formants(kana[i], &f1, &f2);
+        check(f1 > 0 && f2 > 0,
+              "%s: 子音区間のフォルマントが取れない", kana[i]);
+        if (f1 <= 0 || f2 <= 0) continue;
+        /* 子音区間の違いは F1 にいちばんはっきり出る。
+           半母音・流音は舌が高く / 唇が狭いので F1 が低く (実測 332-392Hz)、
+           鼻音 /m/ は口を閉じて口蓋に響かせるので F1 が高い (実測 746Hz)。
+           25ms の窓では高調波の間隔が粗く、F2 は F3 や倍音と混ざって
+           安定しないので、F1 で判定する。
+           旧コードでは、ら が F1=754 で ま (746) とほぼ同じになっていた。 */
+        check(f1 < m1 - 200.0,
+              "%s: F1 が ま と区別できない (%s %.0fHz / ま %.0fHz)",
+              kana[i], kana[i], f1, m1);
+    }
+    (void)m2;
+}
+
+/* 子音区間そのものの「ま との距離」。スペクトル形状が違えば十分離れる。
+   実測 (2026-11): 修正前 や 6.4 / ら 1.8 / わ 3.4 dB
+                   修正後 や 13.3 / ら 7.2 / わ 12.3 dB */
+static void test_semivowel_spectrum_not_nasal(void)
+{
+    static const double bands[6][2] = {
+        { 200, 450 }, { 450, 700 }, { 700, 1000 },
+        { 1000, 1400 }, { 1400, 1900 }, { 1900, 2600 }
+    };
+    double ref[6], refMax = -1e9;
+    int n = yk_speak_kana("ま", yk_preset(0), buf,
+                          (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+    check(n > 0, "ま: 合成失敗 (区間スペクトル)");
+    if (n <= 0) return;
+    /* 30-70ms。鼻音は閉鎖のあとに山が来るので、20ms 起点だと閉鎖の
+       無音側を拾ってしまう (ま と な が同じ値になる)。 */
+    int st = SR * 30 / 1000, len = SR * 40 / 1000;
+    check(st + len <= n, "ま: 区間が取れない");
+    if (st + len > n) return;
+    for (int b = 0; b < 6; b++) {
+        ref[b] = band_energy(buf + st, len, SR, bands[b][0], bands[b][1]);
+        if (ref[b] > refMax) refMax = ref[b];
+    }
+
+    const char *kana[3] = { "や", "ら", "わ" };
+    /* 実測 や 10.1 / ら 5.3 / わ 8.7 dB に余裕を持たせた下限。
+       旧コード (前後母音へ強く寄せていた) では や 3.9 / ら 3.9 / わ 7.3 で
+       すべてここで落ちる。 */
+    const double want[3] = { 8.5, 4.5, 7.5 };
+    for (int i = 0; i < 3; i++) {
+        int m = yk_speak_kana(kana[i], yk_preset(0), buf,
+                              (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+        check(m > 0, "%s: 合成失敗 (区間スペクトル)", kana[i]);
+        if (m <= 0 || st + len > m) continue;
+        double sum = 0.0, mx = -1e9;
+        for (int b = 0; b < 6; b++) {
+            double v = band_energy(buf + st, len, SR, bands[b][0], bands[b][1]);
+            if (v > mx) mx = v;
+        }
+        for (int b = 0; b < 6; b++) {
+            double v = band_energy(buf + st, len, SR, bands[b][0], bands[b][1]);
+            double d = (v - mx) - (ref[b] - refMax);
+            sum += d * d;
+        }
+        double rmsD = sqrt(sum / 6.0);
+        check(rmsD > want[i],
+              "%s: 子音区間が ま と区別できない (距離 %.1f dB < %.1f dB)",
+              kana[i], rmsD, want[i]);
+    }
+}
+
+/* 修正で半母音の「渡り」が母音側へ不連続に入っていないこと。
+   フォルマントを母音へ寄せなくなったぶん、切り替わりでクリックが出やすい。 */
+static void test_semivowel_no_click(void)
+{
+    const char *kana[3] = { "や", "ら", "わ" };
+    for (int i = 0; i < 3; i++) {
+        int n = yk_speak_kana(kana[i], yk_preset(0), buf,
+                              (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+        check(n > 0, "%s: 合成失敗 (クリック)", kana[i]);
+        if (n <= 0) continue;
+        int c = count_clicks(buf, n);
+        check(c == 0, "%s: 母音への渡りでクリック %d 個", kana[i], c);
+        /* モーラ間を無音で分断していないこと */
+        int ms = SR / 1000;
+        double pk = 0;
+        for (int j = 0; j < n; j++) if (fabs(buf[j]) > pk) pk = fabs(buf[j]);
+        int quiet = 0;
+        for (int j = 0; j + ms <= n; j += ms) {
+            double r = rms_between(buf, j, j + ms);
+            if (r < pk / 300.0) quiet++;
+        }
+        check(quiet <= 2, "%s: 無音で分断されている (%d ms)", kana[i], quiet);
+    }
+}
+
 int main(void)
 {
     printf("yukkuri engine %s\n", yk_version());
@@ -1188,6 +1322,9 @@ int main(void)
     test_consonant_not_buzzy();
     test_fricative_stays_bright();
     test_pause_has_no_noise_mix();
+    test_semivowel_distinct_from_nasal();
+    test_semivowel_spectrum_not_nasal();
+    test_semivowel_no_click();
     if (failures) {
         printf("\n%d 件のテストが失敗しました\n", failures);
         return 1;

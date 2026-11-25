@@ -58,6 +58,7 @@ static const char *const PHONE_SYM[YK_P_COUNT] = {
     "r", "y", "w",
     "\xCA\x94",   /* ʔ (声門破裂)。表示用 */
     "ts", "ch", "dz", "U",
+    "wo",       /* を (丸めた唇の /w/)。"w" は わ・うぃ・うぇ */
     "_"
 };
 
@@ -184,7 +185,7 @@ static int kana_to_cv(uint32_t cp, int *cons, int *vowel)
     case 0x308F: *cons = YK_P_W; *vowel = YK_P_A; return 1;
     case 0x3090: *cons = YK_P_W; *vowel = YK_P_I; return 1;
     case 0x3091: *cons = YK_P_W; *vowel = YK_P_E; return 1;
-    case 0x3092: *cons = YK_P_W; *vowel = YK_P_O; return 1;
+    case 0x3092: *cons = YK_P_WO; *vowel = YK_P_O; return 1;
     /* ん・っ・長音・小書き */
     case 0x3093: *cons = YK_P_N; *vowel = -1; return 1;     /* ん */
     case 0x3063: *cons = YK_P_CL; *vowel = -1; return 1;    /* っ */
@@ -310,7 +311,7 @@ static const RomDef ROM[] = {
     { "wa", YK_P_W, YK_P_A, 0 },
     { "wi", YK_P_W, YK_P_I, 0 },
     { "we", YK_P_W, YK_P_E, 0 },
-    { "wo", YK_P_W, YK_P_O, 0 },
+    { "wo", YK_P_WO, YK_P_O, 0 },
     /* 破擦音 */
     { "tsu", YK_P_TS, YK_P_U, 0 }, { "tsa", YK_P_TS, YK_P_A, 0 },
     { "tsi", YK_P_TS, YK_P_I, 0 }, { "tse", YK_P_TS, YK_P_E, 0 }, { "tso", YK_P_TS, YK_P_O, 0 },
@@ -352,7 +353,7 @@ static void apply_accent(YkPlan *out, int acc)
     for (int i = out->count - 1; i >= 0; i--) {
         YkPhone p = (YkPhone)out->items[i].phone;
         if (p == YK_P_PAUSE) return;
-        if (p <= YK_P_O || p == YK_P_Y || p == YK_P_W || p == YK_P_R) {
+        if (p <= YK_P_O || p == YK_P_Y || p == YK_P_W || p == YK_P_WO || p == YK_P_R) {
             out->items[i].accent = (acc > 0) ? 1 : -1;
             return;
         }
@@ -421,7 +422,7 @@ static void nasal_assimilation(YkPlan *out)
 /* モーラを数える単位か (子音はモーラに数えない)。 */
 static int is_mora_head(YkPhone p)
 {
-    return p <= YK_P_O || p == YK_P_Y || p == YK_P_W || p == YK_P_R ||
+    return p <= YK_P_O || p == YK_P_Y || p == YK_P_W || p == YK_P_WO || p == YK_P_R ||
            p == YK_P_N || p == YK_P_NG || p == YK_P_NA || p == YK_P_M;
 }
 
@@ -551,7 +552,7 @@ void yk_apply_accent(YkPlan *out)
                母音は 1.0、子音は音素テーブルの値 (0.70 など)。
                かな経路は子音も amp=1.0 で積んでくるので、ここで
                テーブル値にそろえて子音を埋もれさせない。 */
-            if (p <= YK_P_O || p == YK_P_Y || p == YK_P_W || p == YK_P_R)
+            if (p <= YK_P_O || p == YK_P_Y || p == YK_P_W || p == YK_P_WO || p == YK_P_R)
                 ph->amp = 1.0f;
             else if (p != YK_P_PAUSE && p != YK_P_CL && p != YK_P_GLOTTAL)
                 ph->amp = yk_phone_info(p)->amp;

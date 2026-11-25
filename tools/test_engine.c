@@ -1288,6 +1288,151 @@ static void test_semivowel_no_click(void)
     }
 }
 
+
+/* ---- round-20: 「を」が「も」に聞こえる ----
+
+   「を」は YK_P_W (わ行の /w/) + 「お」で作られていた。ところが「わ」と
+   まったく同じフォルマントを使い回していたため、助詞の「を」が「わ」と
+   同一の音になり、後ろの /o/ と合わせて「も」(鼻音 + /o/) に聞こえていた。
+
+   実際の「を」は唇を丸めて /o/ へ渡る音で、「わ」(唇を丸めない) とは
+   違う。専用の音素 YK_P_WO を足して分けた。
+
+   旧コード (を = わ) の実測: を-も 7.7dB / を-わ 0.0dB (完全一致)
+   新コード:                   を-も 12.8dB / を-わ 6.5dB */
+
+static void test_wo_is_not_w(void)
+{
+    static const double bands[6][2] = {
+        { 200, 450 }, { 450, 700 }, { 700, 1000 },
+        { 1000, 1400 }, { 1400, 1900 }, { 1900, 2600 }
+    };
+    /* 「を」と「わ」は子音区間 (10-45ms) が別物でなければならない */
+    double wo[6], wa[6];
+    int n1 = yk_speak_kana("を", yk_preset(0), buf,
+                           (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+    check(n1 > 0, "を: 合成失敗 (わ との比較)");
+    if (n1 <= 0) return;
+    int st = SR * 10 / 1000, len = SR * 35 / 1000;
+    check(st + len <= n1, "を: 区間が取れない");
+    if (st + len > n1) return;
+    for (int b = 0; b < 6; b++)
+        wo[b] = band_energy(buf + st, len, SR, bands[b][0], bands[b][1]);
+
+    int n2 = yk_speak_kana("わ", yk_preset(0), buf,
+                           (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+    check(n2 > 0, "わ: 合成失敗 (を との比較)");
+    if (n2 <= 0 || st + len > n2) return;
+    for (int b = 0; b < 6; b++)
+        wa[b] = band_energy(buf + st, len, SR, bands[b][0], bands[b][1]);
+
+    /* 帯域幅の違いを補正する (band_energy は 1 ビン平均なので) */
+    double woMax = -1e9, waMax = -1e9;
+    double woN[6], waN[6];
+    for (int b = 0; b < 6; b++) {
+        double wHz = bands[b][1] - bands[b][0];
+        woN[b] = wo[b] - 10.0 * log10(wHz);
+        waN[b] = wa[b] - 10.0 * log10(wHz);
+        if (woN[b] > woMax) woMax = woN[b];
+        if (waN[b] > waMax) waMax = waN[b];
+    }
+    double sum = 0.0;
+    for (int b = 0; b < 6; b++) {
+        double d = (woN[b] - woMax) - (waN[b] - waMax);
+        sum += d * d;
+    }
+    double rmsD = sqrt(sum / 6.0);
+    /* 旧コード (を = わ) では 0.0dB で落ちる。 */
+    check(rmsD > 3.0,
+          "を: 子音区間が わ と同一 (距離 %.1f dB < 3.0 dB)", rmsD);
+}
+
+/* 「を」と「も」が別の音として聞こえること。
+
+   /m/ は鼻音なので、口を閉じたまま鼻腔に響く「ハム」が 450-1.4kHz に
+   広く乗る。唇を丸めた /w/ (を) はそのハムを持たず、代わりに /o/ へ
+   開く途中の低い共鳴 (200-450Hz) が残る。この形の違いを固定する。
+
+   実測 (子音区間 10-45ms、各帯域を最大=0dB に正規化):
+                     200-450  450-700  700-1k  1-1.4k  1.4-1.9k 1.9-2.6k
+       を            -5.9     +0.0    -13.5   -24.1   -29.9   -31.8
+       も            +0.0     -6.5    -12.1   -16.0   -19.2   -24.5
+       お (比較用)   -9.3     +0.0     -8.1   -19.1   -34.6   -38.5
+   → 帯域距離 を-も 7.2dB / を-わ 4.0dB */
+static void test_wo_is_not_mo(void)
+{
+    static const double bands[6][2] = {
+        { 200, 450 }, { 450, 700 }, { 700, 1000 },
+        { 1000, 1400 }, { 1400, 1900 }, { 1900, 2600 }
+    };
+    double wo[6], mo[6];
+    const char *kana[2] = { "を", "も" };
+    double *dst[2] = { wo, mo };
+    int st = SR * 10 / 1000, len = SR * 35 / 1000;
+    for (int k = 0; k < 2; k++) {
+        int n = yk_speak_kana(kana[k], yk_preset(0), buf,
+                              (int)(sizeof(buf) / sizeof(buf[0])), NULL, 0);
+        check(n > 0, "%s: 合成失敗 (も との比較)", kana[k]);
+        if (n <= 0 || st + len > n) return;
+        for (int b = 0; b < 6; b++)
+            dst[k][b] = band_energy(buf + st, len, SR, bands[b][0], bands[b][1]);
+    }
+    /* band_energy は「1 ビンあたりの平均パワー」を返すので、帯域が狭いほど
+       値が大きくなる。帯域幅で割って「単位周波数あたりの密度」に直してから
+       比べないと、狭い帯域 (200-450 = 250Hz) が過大評価される。
+       実測はこの補正を入れた値 (下のコメントの表) と一致する。 */
+    double woN[6], moN[6], woMax = -1e9, moMax = -1e9;
+    for (int b = 0; b < 6; b++) {
+        double wHz = bands[b][1] - bands[b][0];
+        woN[b] = wo[b] - 10.0 * log10(wHz);
+        moN[b] = mo[b] - 10.0 * log10(wHz);
+        if (woN[b] > woMax) woMax = woN[b];
+        if (moN[b] > moMax) moMax = moN[b];
+    }
+    double sum = 0.0;
+    for (int b = 0; b < 6; b++) {
+        double d = (woN[b] - woMax) - (moN[b] - moMax);
+        sum += d * d;
+    }
+    double rmsD = sqrt(sum / 6.0);
+    check(rmsD > 5.0,
+          "を: 子音区間が も と区別できない (距離 %.1f dB < 5.0 dB)", rmsD);
+
+    /* 向きの確認。ここが両者の本質的な違い。
+       実測 (帯域幅で補正し、各音素の最大を 0dB にした値):
+          を   -5.7   +0.0  -14.5  -26.1  -32.6  -36.1   ← 山は 450-700Hz
+          も   +0.0   -6.5  -13.4  -18.3  -22.4  -28.6   ← 山は 200-450Hz
+
+       /m/ は口を閉じたまま鼻腔に響かせるので、いちばん低い共鳴 (鼻音の
+       ハム) が 200-450Hz に来る。丸めた唇の /w/ (を) は唇の共鳴で
+       450-700Hz に山が立ち、そこから上は急に落ちる。
+       「も」のほうが低域寄り、という向きを固定しておく。 */
+    check(moN[0] > moN[1], "も: 200-450Hz が最大でない (設計が変わった)");
+    check(woN[1] > woN[0], "を: 450-700Hz が最大でない (設計が変わった)");
+    double relWo = woN[0] - woN[1];      /* を: 負 (低域のほうが弱い) */
+    double relMo = moN[0] - moN[1];      /* も: 正 (低域のほうが強い) */
+    check(relWo < relMo - 5.0,
+          "を: 低域の重心が も と同じ (を %+.1f / も %+.1f dB)",
+          relWo, relMo);
+    /* 「を」には鼻音のハムが無いので 1-1.4kHz が「も」より 5dB 以上落ちる */
+    check((woN[3] - woN[1]) < (moN[3] - moN[1]) - 5.0,
+          "を: 1-1.4kHz が も と同じ (を %+.1f / も %+.1f dB)",
+          woN[3] - woN[1], moN[3] - moN[1]);
+}
+
+/* 「を」が「わ」と別の音素として登録されていること。
+   共有しているとどちらかを直すともう片方が壊れる (round-19 で実際に
+   「わ」の F2 を下げたとき「を」が巻き添えになった)。 */
+static void test_wo_separate_phone(void)
+{
+    YkPhone wo = yk_phone_from_symbol("wo");
+    YkPhone w  = yk_phone_from_symbol("w");
+    check(wo != YK_P_COUNT, "を: 記号 \"wo\" が解釈されない");
+    check(wo != w, "を: 記号 \"wo\" が \"w\" と同じ音素になっている");
+    check(yk_phone_info(wo)->voiced == 1, "を: 有声でない");
+    check(yk_phone_info(wo)->formant[1] > 0, "を: フォルマントが無い");
+}
+
 int main(void)
 {
     printf("yukkuri engine %s\n", yk_version());
@@ -1325,6 +1470,9 @@ int main(void)
     test_semivowel_distinct_from_nasal();
     test_semivowel_spectrum_not_nasal();
     test_semivowel_no_click();
+    test_wo_is_not_w();
+    test_wo_is_not_mo();
+    test_wo_separate_phone();
     if (failures) {
         printf("\n%d 件のテストが失敗しました\n", failures);
         return 1;

@@ -82,7 +82,7 @@ static const KanaDef KANA[] = {
     {0x308C, YK_P_R, YK_P_E, 0}, {0x308D, YK_P_R, YK_P_O, 0},
     /* わ行 */
     {0x308F, YK_P_W, YK_P_A, 0}, {0x3090, YK_P_W, YK_P_I, 0}, {0x3091, YK_P_W, YK_P_E, 0},
-    {0x3092, YK_P_W, YK_P_O, 0}, {0x3094, YK_P_W, YK_P_U, 0},
+    {0x3092, YK_P_WO, YK_P_O, 0}, {0x3094, YK_P_W, YK_P_U, 0},
     /* ん・っ */
     {0x3093, YK_P_N, YK_P_N, 0},
     {0x3063, YK_P_CL, YK_P_CL, 0},

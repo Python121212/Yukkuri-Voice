@@ -602,7 +602,7 @@ int yk_synthesize(const YkPlan *plan, const YkPreset *preset, float *out, int ou
                    後続母音になじませると識別の手がかりが消える。鼻音
                    (/m/ /n/ /ŋ/ /ɴ/) は閉鎖が別にあるので従来どおり寄せる。 */
                 float k = (p == YK_P_N || p == YK_P_M || p == YK_P_NG || p == YK_P_NA) ? 0.85f :
-                          ((p == YK_P_Y || p == YK_P_W || p == YK_P_R) ? 0.0f : 0.6f);
+                          ((p == YK_P_Y || p == YK_P_W || p == YK_P_WO || p == YK_P_R) ? 0.0f : 0.6f);
                 for (int i = 0; i < 5; i++)
                     target.f[i] = target.f[i] * (1.0f - k) + tmp[i] * k;
             }

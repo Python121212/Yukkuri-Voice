@@ -11,6 +11,14 @@
 サンプル音声は `docs/audio/` にあります（`demo_yukkuri.wav` など）。
 作り直すときは `sh scripts/gen-audio.sh`（読み上げ内容はこのスクリプトの表が唯一の定義）。
 
+| ファイル | 内容 |
+|---|---|
+| `sample_yukkuri.wav` / `sample_reimu.wav` / `sample_marisa.wav` | 「ゆっくりしていってね。」を声 3 種で |
+| `demo_yukkuri.wav` | 「ゆっくりしていってね。ありがとう。」 |
+| `demo_sentence.wav` | 「ゆっくりしていってね。おつかれさま。」 |
+| `vowels_consonants.wav` | あ行・か行・さ行・た行・な行（1 音ずつ区切る） |
+| `consonants_aza.wav` | あ・か・さ・た・な・は・ま・や・ら・わ・を（子音の聞き分け用） |
+
 ---
 
 ## すぐ試す（APK）

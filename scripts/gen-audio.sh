@@ -31,10 +31,14 @@ sample_marisa.wav|ゆっくりしていってね。|marisa
 demo_yukkuri.wav|ゆっくりしていってね。ありがとう。|yukkuri
 demo_sentence.wav|ゆっくりしていってね。おつかれさま。|yukkuri
 vowels_consonants.wav|あ、い、う、え、お、か、き、く、け、こ、さ、し、す、せ、そ、た、ち、つ、て、と、な、に、ぬ、ね、の|yukkuri
+# 子音の聞き分け用。母音のあとに子音を置き、1 音ずつ区切る。
+# 「か」「さ」「な」などが「ざ」に聞こえないかを耳で確かめるためのもの。
+consonants_aza.wav|あ、か、さ、た、な、は、ま、や、ら、わ、を|yukkuri
 '
 
 echo "$TABLE" | while IFS='|' read -r name text preset; do
     [ -n "$name" ] || continue
+    case "$name" in \#*) continue ;; esac    # コメント行
     "$CLI" "$text" "$OUT/$name" "$preset" 2>&1 | sed "s|^|$name: |"
 done
 

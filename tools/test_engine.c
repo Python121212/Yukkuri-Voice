@@ -886,6 +886,103 @@ static double hf_ratio_db(const float *x, int n, int sr)
     return 10.0 * log10((hi + 1e-30) / (lo + hi + 1e-30));
 }
 
+/* ---- 音素テーブルと YK_P_COUNT の整合 ---- */
+/* 「あいうえお」が「あじずぜぞ」に聞こえた原因は、音素テーブル
+   (core/src/phones.c の T) に「ʔ」(声門破裂) の行が抜けていて、
+   テーブルの添字が 1 つずつずれていたこと。すると YK_P_GLOTTAL は
+   1 つ後ろの「つ」(= /ts/, noise 1.10) の行で合成され、母音と母音の
+   あいだに 75ms の破擦音が鳴っていた。
+   C では配列の初期化子が足りないと残りが 0 埋めされるだけなので、
+   コンパイルは通り、警告も出ない (余剰なら警告が出るが、不足は出ない)。
+   そのため「音素ごとの記号」と「音素の性質」の対応を実行時に突き合わせ、
+   ずれを検出する。 */
+static void test_phone_table_matches_enum(void)
+{
+    for (int p = 0; p < YK_P_COUNT; p++) {
+        const YkPhoneInfo *pi = yk_phone_info((YkPhone)p);
+        check(pi != NULL, "音素 %d の情報が無い", p);
+        if (!pi) continue;
+        check(pi->sym != NULL && pi->sym[0] != '\0',
+              "音素 %d (%s) の記号が空。音素テーブル T の行が足りない可能性",
+              p, yk_phone_symbol((YkPhone)p));
+    }
+    /* 声門破裂は「摩擦ノイズを持たない閉鎖」であること。
+       ここに /ts/ や /dz/ の値が入ると母音のあいだが破擦音になる。 */
+    const YkPhoneInfo *gl = yk_phone_info(YK_P_GLOTTAL);
+    check(gl != NULL && gl->noise < 0.01f,
+          "声門破裂に摩擦ノイズが入っている (noise=%.2f)", gl ? (double)gl->noise : -1.0);
+    check(gl != NULL && gl->dur <= 40.0f,
+          "声門破裂が長すぎる (%.0f ms)", gl ? (double)gl->dur : -1.0);
+}
+
+/* ---- 母音の連続に声門破裂・破擦音・無音を入れない ---- */
+/* 「あいうえお」は母音が 5 つ続くだけの語。日本語では母音のあいだに
+   声門破裂を必要としない。以前はここに 75ms の ʔ (しかもテーブルの
+   ずれで /ts/ として合成されていた) が入り、「あじずぜぞ」に聞こえた。 */
+static void test_vowel_sequence_is_smooth(void)
+{
+    const YkPreset *ps = yk_preset(0);
+    const char *words[] = { "あいうえお", "あおい", "とおい" };
+    for (int w = 0; w < 3; w++) {
+        YkPlan pl;
+        check(yk_plan_from_kana(words[w], ps, &pl) == 0, "%s の解析に失敗", words[w]);
+        int nv = 0;
+        for (int i = 0; i < pl.count; i++) {
+            int p = pl.items[i].phone;
+            /* 語頭の子音 (とおい の t) は母音の「あいだ」ではない。
+               最初の母音より後ろに子音・破擦音が現れないことを見る。 */
+            if (p <= YK_P_O) { nv++; continue; }
+            if (i > 0 && nv > 0)
+                check(0, "%s: 母音のあいだに子音が入っている (index %d, phone %d)",
+                      words[w], i, p);
+        }
+        check(nv >= 2, "%s: 母音が 2 つ以上ない (母音 %d)", words[w], nv);
+    }
+}
+
+/* ---- 声門破裂は「?」と書いたときだけ使える ---- */
+static void test_glottal_symbol(void)
+{
+    const YkPreset *ps = yk_preset(0);
+    YkPlan pl;
+    check(yk_plan_from_symbols("a ? i", ps, &pl) == 0, "? の解析に失敗");
+    int got = 0;
+    for (int i = 0; i < pl.count; i++)
+        if (pl.items[i].phone == YK_P_GLOTTAL) got++;
+    check(got == 1, "? が声門破裂になっていない (見つかった数 %d)", got);
+    check(yk_phone_from_symbol("?") == YK_P_GLOTTAL, "? の音素解決に失敗");
+}
+
+/* ---- 母音の連続のあいだがデジタル無音で分断されない ---- */
+/* round-16 の受け入れ基準。ʔ を削るだけだと、直後の母音を立ち上げる
+   4ms の窓で直前の響きを切り落とし、境界ごとにクリックが出ていた。 */
+static void test_vowel_join_has_no_gap(void)
+{
+    const YkPreset *ps = yk_preset(0);
+    enum { N = YK_SR * 3 };
+    static float buf[N];
+    int n = yk_speak_kana("あいうえお", ps, buf, N, NULL, 0);
+    check(n > 0, "母音連続: 合成失敗");
+    if (n <= 0) return;
+    int hop = YK_SR / 500;     /* 2ms */
+    double minr = 1e9;
+    for (int i = 0; i + hop <= n; i += hop) {
+        double e = 0;
+        for (int j = 0; j < hop; j++) e += (double)buf[i + j] * buf[i + j];
+        e = sqrt(e / hop);
+        if (e < minr) minr = e;
+    }
+    check(minr > 1e-3, "母音のあいだが無音で分断されている (最小 RMS %.5f)", minr);
+    /* 8kHz 以上のクリックも無いこと (境界ごとの「ザッ」) */
+    int win = YK_SR / 50;
+    double worst = -200.0;
+    for (int i = 0; i + win <= n; i += YK_SR / 100) {
+        double r = hf_ratio_db(buf + i, win, YK_SR);
+        if (r > worst) worst = r;
+    }
+    check(worst < -40.0, "母音の連続に高域ノイズが乗っている (%.1f dB)", worst);
+}
+
 static void test_no_broadband_hiss(void)
 {
     const YkPreset *ps = yk_preset(0);
@@ -940,6 +1037,10 @@ int main(void)
     test_slash_is_not_glottal();
     test_nasal_g();
     test_no_broadband_hiss();
+    test_phone_table_matches_enum();
+    test_vowel_sequence_is_smooth();
+    test_vowel_join_has_no_gap();
+    test_glottal_symbol();
     if (failures) {
         printf("\n%d 件のテストが失敗しました\n", failures);
         return 1;

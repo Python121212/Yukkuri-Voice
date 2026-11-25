@@ -787,6 +787,15 @@ int yk_plan_from_symbols(const char *text, const YkPreset *preset, YkPlan *out)
             }
         }
 
+        /* 声門破裂「?」。記号パーサは音素テーブルを引かずにここで
+           明示的に扱う (ローマ字表には入れない)。かな入力では自動で
+           入れないので、ここは「?」と書いたときだけ効く。 */
+        if (c0 == '?') {
+            push(out, preset, YK_P_GLOTTAL, 1.0f);
+            append_reading(out->reading, (int)sizeof(out->reading), &rpos, '?');
+            s = nx; continue;
+        }
+
         /* 撥音 N / 促音 Q。ローマ字表より先に見る (q は表に無い) */
         if (c0 == 'N' || c0 == 'Q') {
             if (c0 == 'N') {

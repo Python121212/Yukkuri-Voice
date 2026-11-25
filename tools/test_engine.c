@@ -886,6 +886,150 @@ static double hf_ratio_db(const float *x, int n, int sr)
     return 10.0 * log10((hi + 1e-30) / (lo + hi + 1e-30));
 }
 
+/* ---- 子音が「ざ」に化けないこと (4-8kHz の帯域比) ---- */
+/* 「か」「な」「ま」が「ざ」に聞こえた原因。日本語の子音は 4-8kHz に
+   これほどエネルギーを持たない (母音は -30dB 以下、/s/ のような
+   摩擦音だけが突出する)。修正前は な/ま/か/た/ぱ が -4〜-8dB で、
+   摩擦音 (/s/ の -1dB) に近い「ザー」という音になっていた。
+
+   原因は 2 つ:
+   (1) ノイズ経路の正規化が「その語のノイズ最大値」で割っていたため、
+       摩擦音を含まない語では分母が鼻音の微小ノイズになり、ゲインが
+       上限 4 倍に張り付いて 39dB 増幅されていた (な/ま が該当)。
+   (2) 破裂音の気息を 6kHz まで通していたため、平らなノイズが 75ms
+       鳴っていた (か/た/ぱ/が/だ/ば が該当)。
+
+   修正後は な/ま -19dB、か -17dB、た -13dB。摩擦音 (さ/し/は) は
+   その高域こそが音なので、この指標では変化させない (別テストで
+   重心が 3kHz 以上であることを見る)。 */
+static double band_ratio_db(const float *x, int n, double lo, double hi)
+{
+    double num = 0.0, den = 0.0;
+    for (int k = 1; k < n / 2; k++) {
+        double re = 0.0, im = 0.0;
+        for (int i = 0; i < n; i++) {
+            double a = 2.0 * M_PI * (double)k * (double)i / (double)n;
+            re += x[i] * cos(a);
+            im -= x[i] * sin(a);
+        }
+        double p = re * re + im * im;
+        double f = (double)k * YK_SR / (double)n;
+        if (f >= lo && f < hi) num += p;
+        den += p;
+    }
+    if (den <= 0.0) return -200.0;
+    return 10.0 * log10((num + 1e-30) / (den + 1e-30));
+}
+
+static void test_consonant_not_buzzy(void)
+{
+    const YkPreset *ps = yk_preset(0);
+    enum { N = YK_SR * 3 };
+    static float buf[N];
+    /* 鼻音: 修正前 -6.8 dB。摩擦音を含まない語でゲインが跳ねていた。 */
+    const char *nasal[] = { "な", "ま" };
+    for (int w = 0; w < 2; w++) {
+        int n = yk_speak_kana(nasal[w], ps, buf, N, NULL, 0);
+        check(n > 0, "子音ノイズ: 合成失敗 %s", nasal[w]);
+        if (n <= 0) continue;
+        int win = YK_SR / 50;
+        double worst = -200.0;
+        for (int i = 0; i + win <= n; i += YK_SR / 100) {
+            double pk = 0.0;
+            for (int k = 0; k < win; k++) if (fabs(buf[i + k]) > pk) pk = fabs(buf[i + k]);
+            if (pk < 0.02) continue;
+            double r = band_ratio_db(buf + i, win, 4000.0, 8000.0);
+            if (r > worst) worst = r;
+        }
+        check(worst < -13.0,
+              "%s: 鼻音が「ざ」のように濁っている (4-8kHz %.1f dB)", nasal[w], worst);
+    }
+    /* 破裂音: 修正前 -4〜-8 dB。気息が 6kHz まで通っていた。 */
+    const char *stops[] = { "か", "ぱ", "が" };
+    for (int w = 0; w < 3; w++) {
+        int n = yk_speak_kana(stops[w], ps, buf, N, NULL, 0);
+        check(n > 0, "子音ノイズ: 合成失敗 %s", stops[w]);
+        if (n <= 0) continue;
+        /* 破裂音の気息は子音区間 (先頭 90ms = 子音 75ms + 立ち上がり) に
+           出る。そのあとの母音の立ち上がりは測定対象にしない
+           (母音の最初の 20ms は広帯域の過渡を含むので、子音の評価に
+           混ぜると意味がぼやける)。 */
+        int win = YK_SR / 50;
+        int lim = YK_SR * 90 / 1000;
+        if (lim > n) lim = n;
+        double worst = -200.0;
+        for (int i = 0; i + win <= lim; i += YK_SR / 100) {
+            double pk = 0.0;
+            for (int k = 0; k < win; k++) if (fabs(buf[i + k]) > pk) pk = fabs(buf[i + k]);
+            if (pk < 0.02) continue;
+            double r = band_ratio_db(buf + i, win, 4000.0, 8000.0);
+            if (r > worst) worst = r;
+        }
+        check(worst < -13.0,
+              "%s: 破裂の気息が「ざ」のように濁っている (4-8kHz %.1f dB)", stops[w], worst);
+    }
+}
+
+/* ---- 摩擦音は明るいまま (上の修正で巻き添えにしない) ---- */
+/* 破裂音の気息を 1.2kHz に絞るとき、摩擦音まで絞ると /s/ が /h/ に
+   なって「さ」が「は」に聞こえる。重心が 4kHz 付近にあること。 */
+static void test_fricative_stays_bright(void)
+{
+    const YkPreset *ps = yk_preset(0);
+    enum { N = YK_SR * 3 };
+    static float buf[N];
+    const char *fric[] = { "さ", "し" };
+    for (int w = 0; w < 2; w++) {
+        int n = yk_speak_kana(fric[w], ps, buf, N, NULL, 0);
+        check(n > 0, "摩擦音: 合成失敗 %s", fric[w]);
+        if (n <= 0) continue;
+        int len = YK_SR * 60 / 1000;
+        if (len > n) len = n;
+        double num = 0.0, den = 0.0;
+        for (int k = 1; k < len / 2; k++) {
+            double re = 0.0, im = 0.0;
+            for (int i = 0; i < len; i++) {
+                double a = 2.0 * M_PI * (double)k * (double)i / (double)len;
+                re += buf[i] * cos(a);
+                im -= buf[i] * sin(a);
+            }
+            double m = sqrt(re * re + im * im);
+            double f = (double)k * YK_SR / (double)len;
+            num += m * f;
+            den += m;
+        }
+        double cen = den > 0.0 ? num / den : 0.0;
+        check(cen > 3000.0, "%s: 摩擦音が暗くなった (重心 %.0f Hz)", fric[w], cen);
+    }
+}
+
+/* ---- 休止 (句読点) にノイズを混ぜない ---- */
+/* 休止の区間には直前の母音の減衰が入り込むので、有声だけが大きく出る。
+   そこへノイズを混ぜるとゲインが跳ね、文末の母音の後半を覆ってしまう
+   (「文末の母音が減衰で削られた」と測定されていた)。 */
+static void test_pause_has_no_noise_mix(void)
+{
+    const YkPreset *ps = yk_preset(0);
+    enum { N = YK_SR * 5 };
+    static float buf[N];
+    int n = yk_speak_kana("ゆっくりしていってね。", ps, buf, N, NULL, 0);
+    check(n > 0, "休止ノイズ: 合成失敗");
+    if (n <= 0) return;
+    int hop = YK_SR / 1000;
+    int last = -1;
+    for (int i = 0; i + hop <= n; i += hop) {
+        double e = 0;
+        for (int j = 0; j < hop; j++) e += (double)buf[i + j] * buf[i + j];
+        if (sqrt(e / hop) > 0.02) last = i;
+    }
+    check(last > 0, "文末に有音区間がない (休止ノイズ)");
+    if (last <= 0) return;
+    double a = 0.0, b = 0.0;
+    for (int i = last - YK_SR * 80 / 1000; i < last - YK_SR * 40 / 1000; i++) a += (double)buf[i] * buf[i];
+    for (int i = last - YK_SR * 40 / 1000; i < last - YK_SR * 8 / 1000; i++) b += (double)buf[i] * buf[i];
+    check(b > a * 0.6, "文末の母音が休止のノイズで削られている (比 %.2f)", b / (a + 1e-30));
+}
+
 /* ---- 音素テーブルと YK_P_COUNT の整合 ---- */
 /* 「あいうえお」が「あじずぜぞ」に聞こえた原因は、音素テーブル
    (core/src/phones.c の T) に「ʔ」(声門破裂) の行が抜けていて、
@@ -1041,6 +1185,9 @@ int main(void)
     test_vowel_sequence_is_smooth();
     test_vowel_join_has_no_gap();
     test_glottal_symbol();
+    test_consonant_not_buzzy();
+    test_fricative_stays_bright();
+    test_pause_has_no_noise_mix();
     if (failures) {
         printf("\n%d 件のテストが失敗しました\n", failures);
         return 1;
